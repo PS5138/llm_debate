@@ -1,0 +1,22 @@
+judge_type: "quality"
+few_shot_num_samples: 0
+n_vote: 0
+use_logprobs: false
+language_model:
+  model: "gpt-4o-mini"
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: null
+  timeout: 120
+prompts:
+  word_limit: 250
+  messages:
+    - role: "user"
+      content: |
+        You are answering a two-option medical diagnosis question. You will see only the presenting question stem and two possible diagnoses. You will not see the full patient evidence.
+
+        Question: <QUESTION>
+        A: <ANSWER_A>
+        B: <ANSWER_B>
+
+        Choose the diagnosis you think is most likely to be correct. Think briefly, then on a new line give your final answer formatted exactly as "Answer: <A|B>".

@@ -10,6 +10,7 @@ from omegaconf import DictConfig
 from core.create_agents import setup_debate
 from core.file_handler import Experiment
 from core.llm_api.llm import ModelAPI
+from core.load.medical import main as medical_loader
 from core.load.quality import main as quality_loader
 from core.rollouts.rollout_base import RolloutBase
 from core.utils import (
@@ -21,6 +22,34 @@ from core.utils import (
 LOGGER = logging.getLogger(__name__)
 
 
+async def load_dataset(cfg: DictConfig, filename: Path):
+    if cfg.dataset == "medical":
+        medical_loader(
+            filename,
+            source_path=cfg.medical_source_path,
+            limit=cfg.limit,
+        )
+        return
+
+    await quality_loader(
+        filename,
+        split=cfg.split,
+        max_tokens=cfg.max_tokens_story,
+        limit=cfg.limit,
+        sources=cfg.sources,
+        difficulty=cfg.difficulty,
+        ignore_nyu=cfg.ignore_nyu,
+        minimize_story_duplication=cfg.minimize_story_duplication,
+        max_answerability=cfg.max_answerability,
+        min_untimed_accuracy=cfg.min_untimed_accuracy,
+        max_speed_accuracy=cfg.max_speed_accuracy,
+        min_context_required=cfg.min_context_required,
+        skip_conflicting_labels=cfg.skip_conflicting_labels,
+        max_num_from_same_story=cfg.max_num_from_same_story,
+        human_experiments=cfg.human_experiments,
+    )
+
+
 async def run_debates(
     rollout: RolloutBase,
     filename: Path,
@@ -29,7 +58,7 @@ async def run_debates(
     num_debate_threads: int = 20,
 ):
     # load dataset
-    full_df = pd.read_csv(filename, encoding="utf-8")
+    full_df = pd.read_csv(filename, encoding="utf-8", keep_default_na=False)
     if limit is not None:
         full_df = full_df.head(int(limit))
     if "complete" not in full_df.columns:
@@ -116,23 +145,7 @@ async def async_main(cfg: DictConfig):
     cache_dir = filename.parent / f"cache_{filename.stem}"
     if not filename.exists():
         print(f"No dataset found. Calling loader to {filename}")
-        await quality_loader(
-            filename,
-            split=cfg.split,
-            max_tokens=cfg.max_tokens_story,
-            limit=cfg.limit,
-            sources=cfg.sources,
-            difficulty=cfg.difficulty,
-            ignore_nyu=cfg.ignore_nyu,
-            minimize_story_duplication=cfg.minimize_story_duplication,
-            max_answerability=cfg.max_answerability,
-            min_untimed_accuracy=cfg.min_untimed_accuracy,
-            max_speed_accuracy=cfg.max_speed_accuracy,
-            min_context_required=cfg.min_context_required,
-            skip_conflicting_labels=cfg.skip_conflicting_labels,
-            max_num_from_same_story=cfg.max_num_from_same_story,
-            human_experiments=cfg.human_experiments,
-        )
+        await load_dataset(cfg, filename)
 
     rollout = setup_debate(
         cfg,
@@ -164,23 +177,7 @@ async def async_main(cfg: DictConfig):
         filename = experiment.get_debate_filename(seed=cfg.seed, swap=True)
         cache_dir = filename.parent / f"cache_{filename.stem}"
         if not filename.exists():
-            await quality_loader(
-                filename,
-                split=cfg.split,
-                max_tokens=cfg.max_tokens_story,
-                limit=cfg.limit,
-                sources=cfg.sources,
-                difficulty=cfg.difficulty,
-                ignore_nyu=cfg.ignore_nyu,
-                minimize_story_duplication=cfg.minimize_story_duplication,
-                max_answerability=cfg.max_answerability,
-                min_untimed_accuracy=cfg.min_untimed_accuracy,
-                max_speed_accuracy=cfg.max_speed_accuracy,
-                min_context_required=cfg.min_context_required,
-                skip_conflicting_labels=cfg.skip_conflicting_labels,
-                max_num_from_same_story=cfg.max_num_from_same_story,
-                human_experiments=cfg.human_experiments,
-            )
+            await load_dataset(cfg, filename)
 
         rollout.cache_dir = cache_dir
         complete_swap = await async_function_with_retry(

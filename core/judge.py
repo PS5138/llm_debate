@@ -38,7 +38,7 @@ async def run_judge(
     judge_type: JudgeType = JudgeType.default,
 ):
     # load data
-    full_df = pd.read_csv(filename)
+    full_df = pd.read_csv(filename, keep_default_na=False)
     if limit is not None:
         full_df = full_df.head(int(limit))
     assert full_df[

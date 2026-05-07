@@ -36,7 +36,11 @@ def price_per_token(model_id: str) -> tuple[float, float]:
     """
     Returns the (input token, output token) price for the given model id.
     """
-    if model_id == "gpt-4-1106-preview":
+    if model_id == "gpt-4o-mini":
+        prices = 0.00015, 0.0006
+    elif model_id == "gpt-4o":
+        prices = 0.0025, 0.01
+    elif model_id == "gpt-4-1106-preview":
         prices = 0.01, 0.03
     elif model_id == "gpt-3.5-turbo-1106":
         prices = 0.001, 0.002
@@ -176,16 +180,16 @@ class OpenAIModel(ModelAPIProtocol):
 
         # make dummy request to get token and request capacity
         model_metadata = await self._get_dummy_response_header(model_id)
-        token_capacity = int(model_metadata["x-ratelimit-limit-tokens"])
-        request_capacity = int(model_metadata["x-ratelimit-limit-requests"])
+        token_capacity = int(model_metadata.get("x-ratelimit-limit-tokens", 200000))
+        request_capacity = int(model_metadata.get("x-ratelimit-limit-requests", 500))
         print(
             f"got capacities for model {model_id}: {token_capacity}, {request_capacity}"
         )
         tokens_consumed = token_capacity - int(
-            model_metadata["x-ratelimit-remaining-tokens"]
+            model_metadata.get("x-ratelimit-remaining-tokens", token_capacity)
         )
         requests_consumed = request_capacity - int(
-            model_metadata["x-ratelimit-remaining-requests"]
+            model_metadata.get("x-ratelimit-remaining-requests", request_capacity)
         )
         print(
             f"consumed capacities for model {model_id}: {tokens_consumed}, {requests_consumed}"
@@ -283,6 +287,8 @@ _GPT_4_MODELS = [
     "gpt-4-32k-0314",
     "gpt-4-32k-0613",
     "gpt-4-1106-preview",
+    "gpt-4o",
+    "gpt-4o-mini",
 ]
 _GPT_TURBO_MODELS = [
     "gpt-3.5-turbo",
@@ -317,7 +323,9 @@ class OpenAIChatModel(OpenAIModel):
         }
         response = requests.post(url, headers=headers, json=data)
         if "x-ratelimit-limit-tokens" not in response.headers:
-            raise RuntimeError("Failed to get dummy response header")
+            LOGGER.warning(
+                "OpenAI dummy request did not return rate-limit headers; using conservative defaults."
+            )
         return response.headers
 
     @staticmethod

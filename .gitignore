@@ -144,3 +144,19 @@ prompt_history/*
 prompt_history
 wandb/
 .hydra/
+
+# Word lockfiles
+~$*.docx
+
+# Local-only working files (not for the public repo)
+CLAUDE.md
+Medical Debate.docx
+scripts/build_proposal_docx.py
+
+# Extra local Python environments (beyond the main .venv pattern above)
+.venv-*/
+debate_env/
+
+# Large DDXPlus raw data — not redistributed; regenerate locally with scripts/prepare_ddxplus_debate_pilot.py
+data/ddxplus/release_test_patients
+data/ddxplus/release_test_patients.zip
