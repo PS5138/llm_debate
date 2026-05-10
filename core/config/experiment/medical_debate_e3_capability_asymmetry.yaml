@@ -1,0 +1,17 @@
+# @package _global_
+
+defaults:
+  - debaters/medical_v1@correct_debater
+  - debaters/medical_v1@incorrect_debater
+  - rollout: sim
+  - judge/debate/medical_e3_capability_asymmetry@judge
+  - judge/debate/preference_medical@correct_preference
+  - judge/debate/preference_medical@incorrect_preference
+  - judge/debate/intermediary@cross_examiner
+  - judge/debate/concession_medical@concession_judge
+  - _self_
+
+method: debate
+method_type: sim
+use_intermediary: false
+dataset: medical

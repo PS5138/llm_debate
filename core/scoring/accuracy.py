@@ -14,16 +14,29 @@ LOGGER = logging.getLogger(__name__)
 
 
 def find_answer(text, letter):
-    pattern = re.compile(
-        f"^(?:Final )?Answer: (<{letter}>|{letter})(?:\n|$)", re.MULTILINE
-    )
-    matches = pattern.findall(text)
-    found_match = len(matches) > 0
+    # Take the LAST "Answer: <X>" occurrence in the text as the judge's
+    # final pick. Two regex details matter:
+    #   1. (?![A-Za-z]) — without this, "Final answer: Answer: B" matches
+    #      "answer: A" by consuming the literal A inside the next word
+    #      "Answer", silently inverting the score. See tests/test_accuracy.py.
+    #   2. Last match wins — if a judge writes "Answer: A" then changes
+    #      its mind to "Answer: B" on a new line, we honour the later one.
+    any_answer = re.compile(r"Answer:\s*<?([AB])>?(?![A-Za-z])", re.IGNORECASE)
+    all_matches = list(any_answer.finditer(text))
+    if all_matches:
+        return all_matches[-1].group(1).upper() == letter
+
+    # Legacy fallback: some older judge prompts produce phrasings like
+    # "the correct answer is most likely to be (A) ..." instead of
+    # "Answer: A". Keep this path so QuALITY-era cached transcripts still
+    # score the same way they always have.
     if f"correct answer is most likely to be ({letter}" in text:
-        found_match = True
-    final_line = text.strip().splitlines()[-1]
-    # Sometimes the final line says: "Final answer when all evidence is considered: Answer: <A|B>"
-    if not found_match and "final answer" in final_line.lower():
+        return True
+
+    # Legacy fallback: a final line of the form
+    # "Final answer when all evidence is considered: <A|B>".
+    final_line = text.strip().splitlines()[-1] if text.strip() else ""
+    if "final answer" in final_line.lower():
         try:
             answer = final_line.split(": ")[-1]
             answer = (
@@ -33,10 +46,11 @@ def find_answer(text, letter):
                 .replace(")", "")
             )
             if answer.strip() == letter:
-                found_match = True
+                return True
         except IndexError:
             pass
-    return found_match
+
+    return False
 
 
 def find_inconclusive(text):
@@ -259,7 +273,7 @@ def main(
 
     if verbose:
         print(df.to_markdown())
-    df.to_csv(results_file, mode="a", index=False)
+    df.to_csv(results_file, mode="a", header=not results_file.exists(), index=False)
 
     df["wins"] = df["accuracy"] * df["num_matches"]
     df["wins"] = df["wins"].astype(int)

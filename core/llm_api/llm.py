@@ -184,14 +184,39 @@ class ModelAPI:
                 )
             )
         else:
-            candidate_responses = await model_class(
-                model_ids,
-                prompt,
-                print_prompt_and_response,
-                max_attempts_per_api_call,
-                n=num_candidates,
-                **kwargs,
-            )
+            max_candidates_per_call = 8
+            if num_candidates <= max_candidates_per_call:
+                candidate_responses = await model_class(
+                    model_ids,
+                    prompt,
+                    print_prompt_and_response,
+                    max_attempts_per_api_call,
+                    n=num_candidates,
+                    **kwargs,
+                )
+            else:
+                candidate_responses = list(
+                    chain.from_iterable(
+                        await asyncio.gather(
+                            *[
+                                model_class(
+                                    model_ids,
+                                    prompt,
+                                    print_prompt_and_response,
+                                    max_attempts_per_api_call,
+                                    n=min(
+                                        max_candidates_per_call,
+                                        num_candidates - start,
+                                    ),
+                                    **kwargs,
+                                )
+                                for start in range(
+                                    0, num_candidates, max_candidates_per_call
+                                )
+                            ]
+                        )
+                    )
+                )
 
         valid_responses = [
             response

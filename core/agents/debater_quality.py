@@ -10,7 +10,7 @@ from core.file_handler import Method, get_few_shot_messages
 from core.llm_api.base_llm import add_assistant_message
 from core.rollouts.utils import CacheManager, TranscriptConfig
 from core.utils import SEPARATOR
-from web.backend.services.parser import TranscriptParser
+from core.transcript_parser import TranscriptParser
 
 LOGGER = logging.getLogger(__name__)
 

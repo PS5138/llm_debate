@@ -151,12 +151,24 @@ wandb/
 # Local-only working files (not for the public repo)
 CLAUDE.md
 Medical Debate.docx
+PLAN.md
 scripts/build_proposal_docx.py
 
 # Extra local Python environments (beyond the main .venv pattern above)
 .venv-*/
 debate_env/
 
-# Large DDXPlus raw data — not redistributed; regenerate locally with scripts/prepare_ddxplus_debate_pilot.py
-data/ddxplus/release_test_patients
-data/ddxplus/release_test_patients.zip
+# Large DDXPlus raw data — not redistributed; regenerate locally with scripts/prepare_ddxplus_debate_pilot.py.
+# Broad pattern covers all release_*_patients splits (test/train/validate) plus their archive forms.
+# The decoded pilot CSV at data/ddxplus/ddxplus_debate_pilot_100.csv IS committed.
+data/ddxplus/release_*_patients
+data/ddxplus/release_*_patients.zip
+data/ddxplus/release_*_patients.csv
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Pytest cache (in addition to the .pytest_cache entry above)
+tests/__pycache__/

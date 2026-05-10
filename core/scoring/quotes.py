@@ -13,7 +13,7 @@ import seaborn as sns
 
 from core.rollouts.utils import TranscriptConfig
 from core.scoring.accuracy import get_accuracy
-from web.backend.services.parser import TranscriptParser
+from core.transcript_parser import TranscriptParser
 
 
 def consistent_hash(data):

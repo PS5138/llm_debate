@@ -36,7 +36,21 @@ def price_per_token(model_id: str) -> tuple[float, float]:
     """
     Returns the (input token, output token) price for the given model id.
     """
-    if model_id == "gpt-4o-mini":
+    if model_id in {"gpt-5.5", "gpt-5.5-2026-04-23"}:
+        prices = 0.005, 0.03
+    elif model_id == "gpt-5.5-pro":
+        prices = 0.03, 0.18
+    elif model_id == "gpt-5.4":
+        prices = 0.0025, 0.015
+    elif model_id == "gpt-5.4-mini":
+        prices = 0.00075, 0.0045
+    elif model_id == "gpt-5":
+        prices = 0.00125, 0.01
+    elif model_id == "gpt-5-mini":
+        prices = 0.00025, 0.002
+    elif model_id == "gpt-5-nano":
+        prices = 0.00005, 0.0004
+    elif model_id == "gpt-4o-mini":
         prices = 0.00015, 0.0006
     elif model_id == "gpt-4o":
         prices = 0.0025, 0.01
@@ -257,6 +271,23 @@ class OpenAIModel(ModelAPIProtocol):
             try:
                 responses = await attempt_api_call()
             except Exception as e:
+                msg = str(e).lower()
+                # Quota / billing exhaustion is NOT a transient rate limit —
+                # retrying just burns time and floods the log. We saw a single
+                # quota-out event produce 3,342 identical retries on a 5-case
+                # smoke before being killed manually. Bail immediately so the
+                # caller sees a clean, actionable error.
+                if (
+                    "exceeded your current quota" in msg
+                    or "insufficient_quota" in msg
+                    or "billing details" in msg
+                ):
+                    raise RuntimeError(
+                        "OpenAI quota exhausted (billing / credit issue). "
+                        "Check https://platform.openai.com/account/billing/overview "
+                        "and re-run once credit is available — cached partial "
+                        "transcripts will be reused."
+                    ) from e
                 error_info = f"Exception Type: {type(e).__name__}, Error Details: {str(e)}, Traceback: {format_exc()}"
                 LOGGER.warn(
                     f"Encountered API error: {error_info}.\nRetrying now. (Attempt {i})"
@@ -290,6 +321,16 @@ _GPT_4_MODELS = [
     "gpt-4o",
     "gpt-4o-mini",
 ]
+_GPT_5_MODELS = [
+    "gpt-5.5",
+    "gpt-5.5-2026-04-23",
+    "gpt-5.5-pro",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+]
 _GPT_TURBO_MODELS = [
     "gpt-3.5-turbo",
     "gpt-3.5-turbo-0613",
@@ -297,7 +338,7 @@ _GPT_TURBO_MODELS = [
     "gpt-3.5-turbo-16k-0613",
     "gpt-3.5-turbo-1106",
 ]
-GPT_CHAT_MODELS = set(_GPT_4_MODELS + _GPT_TURBO_MODELS)
+GPT_CHAT_MODELS = set(_GPT_5_MODELS + _GPT_4_MODELS + _GPT_TURBO_MODELS)
 
 
 class OpenAIChatModel(OpenAIModel):
@@ -367,6 +408,17 @@ class OpenAIChatModel(OpenAIModel):
         if "logprobs" in params:
             params["top_logprobs"] = params["logprobs"]
             params["logprobs"] = True
+        if model_id.startswith("gpt-5") and "max_tokens" in params:
+            params["max_completion_tokens"] = params.pop("max_tokens")
+        if model_id.startswith("gpt-5"):
+            params.pop("temperature", None)
+            params.pop("top_p", None)
+            if (
+                "max_completion_tokens" in params
+                and params["max_completion_tokens"] is not None
+                and params["max_completion_tokens"] < 64
+            ):
+                params["max_completion_tokens"] = 64
 
         api_start = time.time()
         api_response: OpenAICompletion = await openai.ChatCompletion.acreate(messages=prompt, model=model_id, organization=self.organization, **params)  # type: ignore
@@ -383,8 +435,8 @@ class OpenAIChatModel(OpenAIModel):
                 duration=duration,
                 cost=context_cost
                 + count_tokens(choice.message.content) * completion_token_cost,
-                logprobs=self.convert_top_logprobs(choice.logprobs)
-                if choice.logprobs is not None
+                logprobs=self.convert_top_logprobs(choice.get("logprobs"))
+                if choice.get("logprobs") is not None
                 else None,
             )
             for choice in api_response.choices

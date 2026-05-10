@@ -8,7 +8,7 @@ from core.file_handler import Method, get_few_shot_messages
 from core.llm_api.base_llm import convert_to_prob
 from core.rollouts.utils import CacheManager, Round, TranscriptConfig
 from core.utils import log_model_timings, softmax
-from web.backend.services.parser import TranscriptParser
+from core.transcript_parser import TranscriptParser
 
 LOGGER = logging.getLogger(__name__)
 
@@ -17,11 +17,9 @@ class JudgeQuality(JudgeBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.config.use_logprobs:
-            assert self.config.language_model.model in [
-                "gpt-4-1106-preview",
-                "gpt-4-base",
-                "gpt-3.5-turbo-instruct",
-            ], "Only davinci and gpt-4-base support logprobs"
+            assert self.config.language_model.model.startswith(
+                "gpt-"
+            ), "Logprob preference judging is only supported for OpenAI models"
             LOGGER.info(f"Using logprobs: {self.config.use_logprobs}")
 
     def swap_transcript(self, transcript: TranscriptConfig) -> TranscriptConfig:
@@ -248,6 +246,27 @@ class JudgeQuality(JudgeBase):
         new_transcript = TranscriptConfig(**new_transcript)
 
         messages = self.construct_messages(new_transcript)
+
+        if not self.config.use_logprobs or self.config.language_model.model.startswith(
+            "gpt-5"
+        ):
+            response = await self.api_handler.call_single(
+                model_ids=self.config.language_model.model,
+                prompt=messages,
+                temperature=self.config.language_model.temperature,
+                top_p=self.config.language_model.top_p,
+                max_tokens=self.config.language_model.max_tokens,
+            )
+            answer = response.strip().upper()
+            if not new_transcript.swap:
+                target = "A" if side == "correct" else "B"
+            else:
+                target = "B" if side == "correct" else "A"
+            if answer.startswith(target) or f"ANSWER: {target}" in answer:
+                return 1.0
+            if answer.startswith("A") or answer.startswith("B") or "ANSWER:" in answer:
+                return 0.0
+            return 0.5
 
         responses = await self.api_handler(
             model_ids=self.config.language_model.model,

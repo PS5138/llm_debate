@@ -69,18 +69,47 @@ The primary metric is **judge accuracy** (with bootstrap 95% confidence interval
 
 ## What this fork adds on top of upstream
 
+**Pilot dataset and loader**
 - `core/load/medical.py` — DDXPlus loader. Converts the prepared pilot CSV into the repo's internal question schema.
-- `core/config/experiment/medical_blind.yaml`, `medical_oracle.yaml` — baseline experiment configs.
-- `core/config/experiment/judge/baselines/medical_*.yaml` — judge prompts for the medical baselines.
+- `data/ddxplus/ddxplus_debate_pilot_100.csv` — the 100-case pilot. Raw DDXPlus release files are gitignored; rebuild locally with `scripts/prepare_ddxplus_debate_pilot.py`.
+
+**Experiment configs — medical baselines and four debate conditions**
+- `core/config/experiment/medical_blind.yaml`, `medical_oracle.yaml` — baseline experiment configs (B1, B2).
+- `core/config/experiment/medical_debate.yaml` — debate experiment config; defaults to E1.
+- `core/config/experiment/medical_debate_e{2,3,4}_*.yaml` — per-condition variants for E2 (double asymmetry), E3 (capability asymmetry), E4 (full symmetry).
+- `core/config/experiment/debaters/medical_v1.yaml` — debater config with medical-shaped prompts (replaces the upstream story-comprehension wording).
+- `core/config/experiment/judge/baselines/medical_*.yaml` — baseline judge prompts.
+- `core/config/experiment/judge/debate/medical_e{1,2,3,4}_*.yaml` — per-condition main-judge prompts.
+- `core/config/experiment/judge/debate/preference_medical.yaml`, `concession_medical.yaml` — preference and concession judges, medical-shaped.
+
+**Runner and analysis scripts**
 - `scripts/prepare_ddxplus_debate_pilot.py` — builds the pilot CSV from the raw DDXPlus release.
-- `scripts/run_medical_baselines.sh` — single entrypoint for the blind + oracle baseline pipeline.
-- `data/ddxplus/ddxplus_debate_pilot_100.csv` — the prepared 100-case pilot. Raw DDXPlus release files are gitignored; rebuild locally with the script above.
-- `EDA.ipynb` — exploratory analysis of the pilot dataset and the pipeline outputs.
-- Minimal modifications to `core/debate.py`, `core/judge.py`, `core/main.py`, `core/llm_api/openai_llm.py`, and `core/config/config.yaml` — medical-pipeline plumbing (dataset selection, model registry entries).
+- `scripts/run_medical_baselines.sh` — runs the blind + oracle baselines.
+- `scripts/run_medical_debate.sh` — generates one debate transcript per case, re-judges across all four conditions (E1–E4), runs the concession judge, and produces the bias-control analyses.
+- `scripts/analyze_medical_debate.py` — computes verbosity, quote-verification, and concession metrics from cached transcripts. Pure file-system work; no API calls.
+- `scripts/export_medical_debate_output.py` — produces a single readable markdown file with the full debate and all four judgements per case (useful for review).
+- `EDA.ipynb` — exploratory analysis of the pilot dataset and pipeline outputs.
+
+**Tests**
+- `tests/test_accuracy.py` — 19 regression cases for `find_answer`, pinning the bug shapes that previously inverted scoring whenever a judge wrapped its answer in `"Final answer: Answer: <X>"`. Run with `python tests/test_accuracy.py` or `make test`.
+
+**Internal modules**
+- `core/transcript_parser.py` — `<quote>` verification helpers (`normalize_text`, `add_missing_quote_tags`, `verify`, `verify_strict`), extracted from the upstream `web/backend/services/parser.py` so the medical pipeline can run without the human-trial web stack.
+
+**Modifications to upstream code**
+- `core/scoring/accuracy.py` — `find_answer` rewrite that takes the last `Answer: <X>` occurrence as the judge's final pick, with a negative lookahead that prevents matching the literal `A` inside the next word "Answer". Pinned by `tests/test_accuracy.py`.
+- `core/llm_api/openai_llm.py` — added the GPT-5.x family to the model registry and pricing table; added GPT-5-specific param handling (`max_completion_tokens` rename, dropped `temperature`/`top_p`); added a fast-fail path for OpenAI quota / billing exhaustion so the retry loop bails out immediately with a clear error rather than burning thousands of identical retries.
+- `core/llm_api/llm.py` — chunks BoN candidate sampling at 8 per call to stay within OpenAI rate limits and avoid silent dropped completions.
+- `core/agents/judge_quality.py` — falls back from logprob preference judging to plain completion for GPT-5-family models (their logprob API path doesn't apply).
+- `core/debate.py`, `core/judge.py`, `core/main.py`, `core/config/config.yaml` — medical-pipeline plumbing (dataset selection, model registry entries).
+
+**Removed from upstream**
+- `web/` — the original Khan et al. human-trial web frontend (FastAPI + React) was QuALITY-only and not used by the medical experiments. Removed to keep the fork lean. The shared `TranscriptParser` it hosted now lives in `core/transcript_parser.py`. If you need the live-debate UI back, copy it from upstream and re-point its imports.
+- `scripts/human_trial_example/` — example code for the human-trial database. Tied to the deleted web stack.
 
 ## Status
 
-Sprint in progress. The pilot dataset, baseline pipeline, and configs are wired up. Debate runs and full analysis are next.
+End-to-end medical pipeline is wired up and runs on OpenAI: dataset loader, all baseline and debate configs, runner scripts, regression tests, and the bias-control analyses (verbosity, quote-verification, concession). The Anthropic adapter is still on the upstream legacy Completion API and would need a Messages-API rewrite before the Anthropic family can run. A 1-case OpenAI smoke confirmed the pipeline produces clean clinical debates (100% verified-quote rate on both sides, balanced word counts, no concessions). Full 100-case run pending.
 
 ## Quickstart
 
@@ -98,14 +127,36 @@ pip install -r requirements.txt
 # 3. The 100-case pilot CSV is already committed. To rebuild from the raw DDXPlus release:
 python scripts/prepare_ddxplus_debate_pilot.py
 
-# 4. Run the baseline pipeline. First arg = number of cases; second arg (optional) = exp dir.
-./scripts/run_medical_baselines.sh 20             # 20-case smoke  -> exp/medical_pilot_n20
-./scripts/run_medical_baselines.sh 100            # full pilot     -> exp/medical_pilot_n100
+# 4. Sanity-check the scoring code. No API calls.
+python tests/test_accuracy.py        # or: make test
+
+# 5. Run the baselines. First arg = number of cases; second arg (optional) = exp dir.
+./scripts/run_medical_baselines.sh 20             # 20-case smoke
+./scripts/run_medical_baselines.sh 100            # full pilot
+
+# 6. Run the debate pipeline. Generates one debate per case, then judges across
+#    four conditions (E1-E4), runs the concession judge, and writes bias-control
+#    analyses. The four debate conditions all re-use the same cached transcript
+#    per case — only the main judge changes — so the marginal cost of additional
+#    conditions is small.
+./scripts/run_medical_debate.sh 5 exp/medical_debate_n5 openai      # 5-case smoke
+./scripts/run_medical_debate.sh 100 exp/medical_debate_n100 openai  # full pilot
+
+# 7. Re-run the bias-control analyses on cached transcripts (no API spend).
+python scripts/analyze_medical_debate.py exp/medical_debate_n5/openai
 ```
 
-Outputs land under `exp/<run-name>/baseline_blind/data0.csv` and `exp/<run-name>/baseline_oracle/data0.csv`. The "Pipeline-Backed Baseline" section of `EDA.ipynb` reads those CSVs and produces a comparison plot.
+Outputs land under `exp/<run-name>/`:
 
-For the full debate runs, follow the same pattern as the baseline script with `+experiment=debate` and the appropriate judge override; the four debate conditions are produced by re-judging the cached transcripts with different judge models and prompt variants.
+| Path | What it is |
+|---|---|
+| `baseline_blind/data0.csv`, `baseline_oracle/data0.csv` | Baseline judge results (B1, B2). |
+| `<family>/debate_sim/data0.csv` | Debate transcripts, generated once per family. |
+| `<family>/debate_sim/<condition>_<judge>/data0[_swap]_judgement.csv` | Per-condition judge decisions, in answer-letter swap pairs. |
+| `<family>/debate_sim/concession_<model>/data0[_swap]_judgement.csv` | Concession-judge output. |
+| `<family>/results.csv` | Accumulated accuracy per condition. |
+| `<family>/analysis/{verbosity,quote_verification,concession}.csv` | Bias-control summaries plus matching `_summary.txt` files. |
+| `<family>/one_debate_outputs.md` | Single-file markdown export of the debates and judgements (useful for review). |
 
 ## Acknowledgements
 
@@ -143,6 +194,6 @@ This fork is licensed under the same MIT licence as upstream (see `LICENSE`).
 
 ---
 
-## Original upstream README (Khan et al.)
+## Note on the upstream codebase
 
-Setup and reproduction instructions for the QuALITY experiments are unchanged from upstream. See the [original repository](https://github.com/ucl-dark/llm_debate) for the QuALITY-specific quickstart, the human-trial frontend, and tournament instructions.
+This fork removes the upstream human-trial web frontend (`web/`), which was QuALITY-only and not used by the medical experiments. The QuALITY loader, debater/judge prompts, and rollouts are kept in place so the QuALITY codepath itself still works — you just won't have the live-debate UI or the human-trial database tooling to drive it. See the [original repository](https://github.com/ucl-dark/llm_debate) if you need either.
