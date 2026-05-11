@@ -85,8 +85,10 @@ The primary metric is **judge accuracy** (with bootstrap 95% confidence interval
 **Runner and analysis scripts**
 - `scripts/prepare_ddxplus_debate_pilot.py` — builds the pilot CSV from the raw DDXPlus release.
 - `scripts/run_medical_baselines.sh` — runs the blind + oracle baselines.
-- `scripts/run_medical_debate.sh` — generates one debate transcript per case, re-judges across all four conditions (E1–E4), runs the concession judge, and produces the bias-control analyses.
-- `scripts/analyze_medical_debate.py` — computes verbosity, quote-verification, and concession metrics from cached transcripts. Pure file-system work; no API calls.
+- `scripts/run_medical_debate.sh` — generates one debate transcript per case, re-judges across all four conditions (E1–E4), runs the concession judge, and triggers the bias-control analyses, aggregator, and cost summary.
+- `scripts/analyze_medical_debate.py` — per-family bias-control diagnostics. Computes verbosity (per-side word counts), quote verification (verified vs unverified `<quote>` tag counts), and concession rate, and emits matching PNG plots. Pure file-system work; no API calls.
+- `scripts/aggregate_medical_results.py` — cross-run aggregator. Reads cached judgement CSVs and writes `accuracy_by_condition.csv`, `pgr_by_condition.csv`, and `per_case_lift.csv` with bootstrap 95% CIs, plus the three headline plots (accuracy by condition, PGR by condition, per-case 2×2 lift heatmaps).
+- `scripts/summarise_run_costs.py` — greps the Hydra logs for per-call cost lines and emits `cost_summary.csv` for spend tracking against the budget.
 - `scripts/export_medical_debate_output.py` — produces a single readable markdown file with the full debate and all four judgements per case (useful for review).
 - `EDA.ipynb` — exploratory analysis of the pilot dataset and pipeline outputs.
 
@@ -99,17 +101,28 @@ The primary metric is **judge accuracy** (with bootstrap 95% confidence interval
 **Modifications to upstream code**
 - `core/scoring/accuracy.py` — `find_answer` rewrite that takes the last `Answer: <X>` occurrence as the judge's final pick, with a negative lookahead that prevents matching the literal `A` inside the next word "Answer". Pinned by `tests/test_accuracy.py`.
 - `core/llm_api/openai_llm.py` — added the GPT-5.x family to the model registry and pricing table; added GPT-5-specific param handling (`max_completion_tokens` rename, dropped `temperature`/`top_p`); added a fast-fail path for OpenAI quota / billing exhaustion so the retry loop bails out immediately with a clear error rather than burning thousands of identical retries.
+- `core/llm_api/anthropic_llm.py` — full rewrite from the upstream legacy Completion API to the Messages API. Registers the Claude 4 family (Opus 4.7, Sonnet 4.6, Haiku 4.5) with real per-token pricing; extracts `system` messages to the top-level param Anthropic expects; supports BoN via parallel calls; mirrors the OpenAI quota fast-fail; records real cost from `response.usage` (output tokens include Opus's hidden reasoning, so the figures match what Anthropic bills).
 - `core/llm_api/llm.py` — chunks BoN candidate sampling at 8 per call to stay within OpenAI rate limits and avoid silent dropped completions.
 - `core/agents/judge_quality.py` — falls back from logprob preference judging to plain completion for GPT-5-family models (their logprob API path doesn't apply).
 - `core/debate.py`, `core/judge.py`, `core/main.py`, `core/config/config.yaml` — medical-pipeline plumbing (dataset selection, model registry entries).
 
 **Removed from upstream**
-- `web/` — the original Khan et al. human-trial web frontend (FastAPI + React) was QuALITY-only and not used by the medical experiments. Removed to keep the fork lean. The shared `TranscriptParser` it hosted now lives in `core/transcript_parser.py`. If you need the live-debate UI back, copy it from upstream and re-point its imports.
-- `scripts/human_trial_example/` — example code for the human-trial database. Tied to the deleted web stack.
+
+To keep the fork focused on the medical experiments, the following were stripped from the codebase. The QuALITY codepath proper (loader, debater/judge classes, rollouts) is preserved so that infrastructure still resolves cleanly, but nothing in this fork drives it:
+
+- `web/` — the original Khan et al. human-trial web frontend (FastAPI + React); QuALITY-only and not used by the medical experiments. The shared `TranscriptParser` it hosted now lives in `core/transcript_parser.py`.
+- `scripts/human_trial_example/` — example code for the human-trial database.
+- `scripts/reproduce_minimal.sh`, `scripts/run_figure{1,3+5,4}.sh`, `scripts/run_tournament.py`, `scripts/tournament_players/`, `scripts/plot_minimal.ipynb` — Khan QuALITY reproduction scripts and tournament-player configs.
+- `core/tournament.py`, `core/swiss_tournament.py`, `core/scoring/ratings.py`, `core/scoring/trueskill.py` — cross-play tournament and Elo / TrueSkill rating code.
+- `core/scoring/quotes.py` — Khan-era quote-visualisation driver.
+- `core/load/human_questions.csv` — Khan human-trial question list.
+- `core/config/experiment/blind.yaml`, `oracle.yaml`, `consultancy.yaml`, `consultancy_critique_story.yaml`, `debate.yaml`, `debate_critique_story.yaml`, `debate_interactive.yaml`, `debate_seq.yaml` — Khan-era top-level experiment YAMLs, superseded by the medical equivalents.
+- `core/config/experiment/{consultants,critic,judge/consultancy}/` — Khan-era consultancy and critic configs.
+- `core/config/experiment/{debaters/v1_interactive.yaml, judge/baselines/{blind,oracle}.yaml, judge/debate/{default,concession,preference_old}.yaml, rollout/{live,nyu,seq}.yaml}` — Khan sub-configs only referenced by the deleted top-level YAMLs.
 
 ## Status
 
-End-to-end medical pipeline is wired up and runs on OpenAI: dataset loader, all baseline and debate configs, runner scripts, regression tests, and the bias-control analyses (verbosity, quote-verification, concession). The Anthropic adapter is still on the upstream legacy Completion API and would need a Messages-API rewrite before the Anthropic family can run. A 1-case OpenAI smoke confirmed the pipeline produces clean clinical debates (100% verified-quote rate on both sides, balanced word counts, no concessions). Full 100-case run pending.
+End-to-end medical pipeline is wired up and ready to run on both model families: dataset loader, all baseline and debate configs, runner scripts, regression tests, the bias-control analyses (verbosity, quote-verification, concession), the cross-run aggregator (accuracy with bootstrap 95% CIs, PGR, per-case lift), and a cost-summary helper. The Anthropic adapter has been rewritten from the upstream legacy Completion API to the modern Messages API; both families now route cleanly. An initial 1-case OpenAI smoke confirmed the pipeline produces clean clinical debates (100% verified-quote rate on both sides, balanced word counts, no concessions). Full 100-case runs are queued and pending API credit.
 
 ## Quickstart
 
@@ -142,8 +155,13 @@ python tests/test_accuracy.py        # or: make test
 ./scripts/run_medical_debate.sh 5 exp/medical_debate_n5 openai      # 5-case smoke
 ./scripts/run_medical_debate.sh 100 exp/medical_debate_n100 openai  # full pilot
 
-# 7. Re-run the bias-control analyses on cached transcripts (no API spend).
+# 7. Re-run the bias-control analyses and cross-run aggregator on cached
+#    transcripts (no API spend). The aggregator also produces the headline
+#    accuracy / PGR / per-case-lift plots.
 python scripts/analyze_medical_debate.py exp/medical_debate_n5/openai
+python scripts/aggregate_medical_results.py exp/medical_debate_n5/openai \
+    --out-dir exp/medical_debate_n5/medical_results
+python scripts/summarise_run_costs.py exp/medical_debate_n5/openai
 ```
 
 Outputs land under `exp/<run-name>/`:
@@ -155,12 +173,16 @@ Outputs land under `exp/<run-name>/`:
 | `<family>/debate_sim/<condition>_<judge>/data0[_swap]_judgement.csv` | Per-condition judge decisions, in answer-letter swap pairs. |
 | `<family>/debate_sim/concession_<model>/data0[_swap]_judgement.csv` | Concession-judge output. |
 | `<family>/results.csv` | Accumulated accuracy per condition. |
+| `<family>/cost_summary.csv` | Per-stage API spend (debate / judge / scoring / concession), grepped from Hydra logs. |
 | `<family>/analysis/{verbosity,quote_verification,concession}.csv` | Bias-control summaries plus matching `_summary.txt` files. |
+| `<family>/analysis/plots/04_verbosity.png`, `05_concession_rate.png`, `06_quote_verification.png` | Bias-control PNGs. |
 | `<family>/one_debate_outputs.md` | Single-file markdown export of the debates and judgements (useful for review). |
+| `medical_results/{accuracy_by_condition,pgr_by_condition,per_case_lift}.csv` | Cross-run summary CSVs with bootstrap 95% CIs. |
+| `medical_results/plots/{01_accuracy_by_condition,02_pgr_by_condition,03_per_case_lift}.png` | Headline plots for the write-up. |
 
 ## Acknowledgements
 
-This project is being carried out as part of the [BlueDot Impact Technical AI Safety Sprint](https://bluedot.org/), a six-week applied research programme in which participants take a recently published AI-safety paper and produce a small original extension of it. Thanks to the BlueDot Impact team for the programme structure, mentorship, and funding support that make this work possible.
+This project is being carried out as part of the [BlueDot Impact Technical AI Safety Sprint](https://bluedot.org/), a six-week applied research programme in which participants take a recently published AI-safety paper and produce a small original extension of it. With thanks to the BlueDot Impact team for the programme structure, mentorship, and the grant that funds the API spend behind these experiments — none of this work would happen without that support.
 
 ## Credits and licence
 
@@ -196,4 +218,4 @@ This fork is licensed under the same MIT licence as upstream (see `LICENSE`).
 
 ## Note on the upstream codebase
 
-This fork removes the upstream human-trial web frontend (`web/`), which was QuALITY-only and not used by the medical experiments. The QuALITY loader, debater/judge prompts, and rollouts are kept in place so the QuALITY codepath itself still works — you just won't have the live-debate UI or the human-trial database tooling to drive it. See the [original repository](https://github.com/ucl-dark/llm_debate) if you need either.
+This fork has been stripped of QuALITY-only tooling that wasn't used by the medical experiments — the human-trial web frontend, the figure-reproduction scripts, the cross-play tournament code, the Elo / TrueSkill ratings, and a substantial number of Khan-era experiment YAMLs. The QuALITY loader, debater / judge classes, and rollouts are kept in place so the underlying infrastructure still resolves cleanly, but nothing in this fork drives them end-to-end. If you need the human-trial UI, the figure-reproduction scripts, or the tournament code, see the [original repository](https://github.com/ucl-dark/llm_debate).

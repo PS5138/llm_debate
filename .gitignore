@@ -154,6 +154,14 @@ Medical Debate.docx
 PLAN.md
 scripts/build_proposal_docx.py
 
+# Khan-era QuALITY tooling has been removed from this fork; these patterns
+# prevent accidental re-add if someone copies them back from upstream.
+scripts/reproduce_minimal.sh
+scripts/run_figure*.sh
+scripts/run_tournament.py
+scripts/tournament_players/
+scripts/plot_minimal.ipynb
+
 # Extra local Python environments (beyond the main .venv pattern above)
 .venv-*/
 debate_env/

@@ -26,6 +26,11 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import matplotlib
+
+matplotlib.use("Agg")  # headless
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 
@@ -152,6 +157,99 @@ def concession_rows(exp_dir: Path) -> Optional[list[dict]]:
 
 
 # ---------------------------------------------------------------------------
+# Plots
+# ---------------------------------------------------------------------------
+
+
+def plot_verbosity(verbosity_df: pd.DataFrame, family_label: str, out_path: Path) -> None:
+    """Bar chart of mean words per round per side, plus the per-case
+    correct-vs-incorrect-side word balance overlaid as light dots.
+    Lets a reader see at a glance whether one side is systematically wordier.
+    """
+    if verbosity_df.empty:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    per_side = verbosity_df.groupby("side")["words"].agg(["mean", "std"])
+    sides = list(per_side.index)
+    means = per_side["mean"].values
+    stds = per_side["std"].fillna(0).values
+    colours = ["#3b7bd6", "#d6643b"]
+    bars = ax.bar(sides, means, yerr=stds, capsize=4, color=colours, alpha=0.75,
+                  edgecolor="black", linewidth=0.5)
+    # Overlay per-round word counts as light scatter for additional context
+    for i, side in enumerate(sides):
+        ys = verbosity_df[verbosity_df["side"] == side]["words"].values
+        xs = np.full_like(ys, i, dtype=float) + np.random.uniform(-0.15, 0.15, size=len(ys))
+        ax.scatter(xs, ys, color="black", alpha=0.25, s=18, zorder=3)
+    ax.axhline(150, color="grey", linestyle="--", alpha=0.6, label="150-word cap")
+    ax.set_ylabel("Words per round")
+    ax.set_title(f"Verbosity per debater — {family_label}\n(bar = mean ± SD; dots = individual rounds)")
+    ax.set_ylim(0, max(170, float(verbosity_df["words"].max()) * 1.1))
+    ax.legend(loc="lower right")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_concession(concession_df: pd.DataFrame, family_label: str, out_path: Path) -> None:
+    """Single-bar chart of % debates flagged for concession, with the
+    20% suspect-threshold drawn for reference.
+    """
+    if concession_df.empty:
+        return
+    rate = concession_df["conceded"].mean() * 100
+    n = len(concession_df)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.bar([family_label], [rate], color="#d6643b", alpha=0.8,
+           edgecolor="black", linewidth=0.5)
+    ax.axhline(20, color="grey", linestyle="--", alpha=0.6, label="20% suspect threshold")
+    ax.set_ylabel("% of debates with concession")
+    ax.set_ylim(0, max(30, rate * 1.4))
+    ax.set_title(f"Concession rate — {family_label} (n={n})")
+    ax.annotate(f"{rate:.1f}%", xy=(0, rate), xytext=(0, rate + 1.5),
+                ha="center", fontsize=11, fontweight="bold")
+    ax.legend(loc="upper right")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def plot_quote_verification(quotes_df: pd.DataFrame, family_label: str, out_path: Path) -> None:
+    """Stacked bar per side: verified (green) + unverified (red).
+    Reviewers ask 'did the debaters confabulate?' — this answers it.
+    """
+    if quotes_df.empty:
+        return
+    per_side = quotes_df.groupby("side")[["n_verified", "n_unverified"]].sum()
+    sides = list(per_side.index)
+    verified = per_side["n_verified"].values
+    unverified = per_side["n_unverified"].values
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    ax.bar(sides, verified, label="verified <v_quote>", color="#3b8c4f",
+           edgecolor="black", linewidth=0.5)
+    ax.bar(sides, unverified, bottom=verified, label="unverified <u_quote>",
+           color="#b83b3b", edgecolor="black", linewidth=0.5)
+    totals = verified + unverified
+    for i, total in enumerate(totals):
+        if total > 0:
+            pct = 100 * verified[i] / total
+            ax.annotate(f"{int(verified[i])}/{int(total)}\n({pct:.0f}% verified)",
+                        xy=(i, total), xytext=(0, 5),
+                        textcoords="offset points",
+                        ha="center", fontsize=9, fontweight="bold")
+    ax.set_ylabel("Quote count")
+    ax.set_title(f"Quote verification per side — {family_label}")
+    ax.legend(loc="lower right")
+    ax.set_ylim(0, max(totals) * 1.25 if len(totals) and max(totals) > 0 else 1)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
 
@@ -166,10 +264,14 @@ def main(exp_dir: Path) -> None:
         raise SystemExit(f"missing transcript CSV: {debate_csv}")
 
     out_dir = exp_dir / "analysis"
+    plots_dir = out_dir / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     transcripts = load_transcripts(debate_csv)
     n_cases = len(transcripts)
+    # Use the leaf dir name (typically `openai` or `anthropic`) as a label
+    family_label = exp_dir.name or "run"
     print(f"loaded {n_cases} transcript(s) from {debate_csv}")
 
     # 1. Verbosity ---------------------------------------------------------
@@ -201,6 +303,7 @@ def main(exp_dir: Path) -> None:
                 "meaningful at N >= 20.",
             ],
         )
+        plot_verbosity(v, family_label, plots_dir / "04_verbosity.png")
 
     # 2. Quote verification -------------------------------------------------
     q = pd.DataFrame(quote_rows(transcripts))
@@ -228,6 +331,7 @@ def main(exp_dir: Path) -> None:
                 "confabulating quotes; the judge sees <u_quote> tags for those.",
             ],
         )
+        plot_quote_verification(q, family_label, plots_dir / "06_quote_verification.png")
 
     # 3. Concession ---------------------------------------------------------
     c_rows = concession_rows(exp_dir)
@@ -270,6 +374,7 @@ def main(exp_dir: Path) -> None:
                 "that family should be held back.",
             ],
         )
+        plot_concession(c, family_label, plots_dir / "05_concession_rate.png")
 
     print(f"wrote analysis to {out_dir}/")
 

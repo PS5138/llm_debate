@@ -89,7 +89,16 @@ echo ">>> Running concession judge (${CONCESSION_MODEL}; Y/N only — keep on a 
 echo ">>> Running bias-control analyses (verbosity / quote-rate / concession)"
 "$PYTHON" scripts/analyze_medical_debate.py "${EXP}"
 
+echo ">>> Aggregating accuracy + PGR + per-case lift (no API spend)"
+"$PYTHON" scripts/aggregate_medical_results.py "${EXP}" \
+  --out-dir "${EXP_DIR}/medical_results"
+
+echo ">>> Summarising API spend from logs"
+"$PYTHON" scripts/summarise_run_costs.py "${EXP}"
+
 "$PYTHON" scripts/export_medical_debate_output.py "${EXP}" --limit "${LIMIT}" --family "${FAMILY}"
 
 echo ">>> Wrote consolidated output to ${EXP}/one_debate_outputs.md"
 echo ">>> Wrote analyses to ${EXP}/analysis/"
+echo ">>> Wrote aggregated results to ${EXP_DIR}/medical_results/"
+echo ">>> Wrote cost summary to ${EXP}/cost_summary.csv"
