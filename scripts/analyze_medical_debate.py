@@ -33,6 +33,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# Use the same normalisation rule as the judge so the verification rate
+# reported here matches what the judge actually trusted in the transcript.
+# Importing core/transcript_parser keeps the two sides in lockstep.
+from core.transcript_parser import TranscriptParser
+
 
 QUOTE_RE = re.compile(r"<quote>(.*?)</quote>", re.DOTALL)
 WORD_RE = re.compile(r"\S+")
@@ -92,11 +97,20 @@ def quote_rows(transcripts: list[dict]) -> list[dict]:
     for t in transcripts:
         case = t.get("question_set_id") or t.get("index")
         story = t.get("story") or ""
+        # Normalise the story once per case using the same rule the judge
+        # applies (lowercase, strip punctuation, normalise smart quotes,
+        # collapse whitespace) so the verification rate matches what the
+        # judge actually saw as <v_quote> vs <u_quote>.
+        story_norm = TranscriptParser.normalize_text(story)
         for round_idx, r in enumerate(t.get("rounds", []), start=1):
             for side in ("correct", "incorrect"):
                 arg = r.get(side) or ""
                 quotes = QUOTE_RE.findall(arg)
-                verified = sum(1 for q in quotes if q.strip() in story)
+                verified = sum(
+                    1
+                    for q in quotes
+                    if TranscriptParser.normalize_text(q) in story_norm
+                )
                 rows.append(
                     {
                         "case_id": case,
