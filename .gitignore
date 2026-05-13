@@ -152,6 +152,7 @@ wandb/
 CLAUDE.md
 Medical Debate.docx
 PLAN.md
+LOCAL_RUNBOOK.md
 scripts/build_proposal_docx.py
 
 # Khan-era QuALITY tooling has been removed from this fork; these patterns
