@@ -154,6 +154,7 @@ Medical Debate.docx
 PLAN.md
 LOCAL_RUNBOOK.md
 EDA.ipynb
+paper.pdf
 scripts/build_proposal_docx.py
 
 # Khan-era QuALITY tooling has been removed from this fork; these patterns
