@@ -4,19 +4,25 @@ This fork uses a 100-case pilot derived from **DDXPlus**, a public synthetic
 differential-diagnosis dataset. It no longer ships the original QuALITY human
 feedback or LLM debate datasets from the upstream repository.
 
-## Files
+## Committed Files
 
 - `data/ddxplus/ddxplus_debate_pilot_100.csv`
   - The prepared 100-case pilot used by the medical debate pipeline.
-- `data/ddxplus/release_test_patients`
-  - Raw DDXPlus test-patient CSV used to rebuild the pilot.
-- `data/ddxplus/release_test_patients.zip`
-  - Compressed copy of the raw DDXPlus test-patient file.
 - `data/ddxplus/release_evidences.json`
   - DDXPlus evidence definitions used to decode evidence IDs into readable
     symptom and antecedent text.
 - `data/ddxplus/release_conditions.json`
   - DDXPlus condition metadata retained with the raw release files.
+
+## Local-Only Files
+
+These files may exist locally when rebuilding the pilot, but they are not
+tracked in Git:
+
+- `data/ddxplus/release_test_patients`
+  - Raw DDXPlus test-patient CSV used to rebuild the pilot.
+- `data/ddxplus/release_test_patients.zip`
+  - Compressed copy of the raw DDXPlus test-patient file.
 
 ## Source
 

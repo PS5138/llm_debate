@@ -5,63 +5,106 @@
 This repository is a work-in-progress research fork of
 [`ucl-dark/llm_debate`](https://github.com/ucl-dark/llm_debate), the codebase
 released with Khan et al. (2024), *Debating with More Persuasive LLMs Leads to
-More Truthful Answers*. The original paper tested AI debate on hard reading
-comprehension questions. This fork adapts that setup to synthetic clinical
-differential diagnosis.
+More Truthful Answers*. The original paper studied debate on hard reading
+comprehension questions. This fork adapts the same broad oversight idea to
+synthetic medical differential diagnosis.
+
+The core question is whether debate can make hidden evidence easier to judge.
+Each case has two candidate diagnoses: the true DDXPlus pathology and a
+plausible distractor from that case's differential diagnosis list. Two debaters
+argue opposite sides while seeing the structured patient evidence. A judge then
+chooses between the diagnoses, sometimes without seeing the evidence directly.
+
+This is not a medical product and it is not a diagnostic system. It is an AI
+safety experiment about oversight: can argument and counterargument help a less
+capable supervisor identify the answer that is better supported by evidence it
+may not inspect directly?
 
 The project is being developed as part of the BlueDot Impact Technical AI
 Safety Sprint, with API spend supported by a BlueDot grant.
 
-This is not a medical product and it is not a diagnostic system. It is a small
-AI safety experiment about oversight: whether argument and counterargument can
-help a less capable judge notice which answer is better supported by hidden
-evidence.
+## Methodology
 
-## The Idea
+### Research Question
 
-As AI systems become more capable, humans and smaller models will increasingly
-need to supervise answers they cannot fully verify from scratch. Medicine is a
-natural example: a powerful model might read a patient record quickly and
-suggest a diagnosis, while the reviewer has limited time and expertise.
-
-AI debate is one proposed oversight method. Instead of asking a judge to solve
-the whole problem alone, two models argue for different answers. The judge then
-evaluates the arguments. If the correct side can point to concrete evidence and
-the incorrect side can be challenged, debate may make the truth easier to
-recognize.
-
-This project asks whether that idea transfers from short-story comprehension to
-medical diagnosis:
+The experiment asks:
 
 > Does AI debate improve blind judging in synthetic differential diagnosis from
 > structured symptom and antecedent evidence?
 
-The exciting part is the asymmetry. The debaters get access to the patient
-evidence. The judge may not. If debate helps anyway, it suggests a practical
-direction for supervising systems whose full reasoning context is too large or
-too costly for every reviewer to inspect directly.
+The headline oversight setting is **E2: double asymmetry**. In that condition,
+stronger debaters see the patient evidence and argue both sides, while a weaker
+judge evaluates the transcript without seeing the evidence. If this improves on
+a blind baseline, debate may be recovering some of the value of hidden evidence
+without requiring the judge to inspect the full record.
 
-## What The Experiment Tests
+### Dataset
 
-Each case gives two possible diagnoses:
+The current pilot uses **DDXPlus**, a public synthetic differential-diagnosis
+dataset. Each case contains patient demographics, an initial complaint, a true
+pathology, a differential diagnosis distribution, and structured evidence such
+as symptoms and antecedent risk factors.
 
-- the true DDXPlus pathology
-- a plausible alternative from the case's own differential diagnosis list
+The committed pilot file is:
 
-Two debaters see the structured patient evidence and argue opposing diagnoses.
-A judge then chooses between the diagnoses. The main study compares four debate
-conditions:
+```text
+data/ddxplus/ddxplus_debate_pilot_100.csv
+```
 
-| Condition | Debaters | Judge | Judge sees evidence? |
-|---|---|---|---|
-| E1: Information asymmetry | Frontier model | Same frontier model | No |
-| E2: Double asymmetry | Frontier model | Weaker model | No |
-| E3: Capability asymmetry | Frontier model | Weaker model | Yes |
-| E4: Full symmetry | Frontier model | Same frontier model | Yes |
+The pilot can be rebuilt from local DDXPlus release files with:
 
-The headline condition is **E2**, where a weaker judge must evaluate arguments
-from stronger debaters without seeing the evidence directly. That is the most
-realistic oversight setting.
+```bash
+python scripts/prepare_ddxplus_debate_pilot.py
+```
+
+The 100 cases are not a simple random sample. The preparation script:
+
+1. Reads the DDXPlus test-patient file and evidence definitions.
+2. Keeps adult cases only.
+3. Requires a non-true diagnosis in the differential list to use as a plausible
+   distractor.
+4. Keeps evidence-rich cases with at least 20 evidence items.
+5. Requires both the true pathology and the distractor to have probability at
+   least `0.05`.
+6. Requires the true-vs-distractor probability gap to be no larger than `0.10`.
+7. Sorts by smallest probability gap, then higher evidence count, then original
+   source row order.
+8. Selects cases round-robin across pathologies so the pilot is not dominated by
+   one condition.
+9. Randomizes whether the true diagnosis appears as diagnosis A or diagnosis B
+   with fixed seed `20260504`.
+
+This deliberately emphasizes difficult two-choice cases where the distractor is
+plausible according to DDXPlus. The raw DDXPlus patient release files are not
+redistributed through this repository; generated experiment outputs are also
+excluded from Git.
+
+### Experimental Arms
+
+Each case is evaluated through blind/oracle baselines and four debate
+conditions.
+
+| Arm | Description | Debaters | Judge | Judge sees evidence? |
+|---|---|---|---|---|
+| B1 | Blind baseline | None | Weaker judge | No |
+| B2 | Oracle baseline | None | Weaker judge | Yes |
+| E1 | Information asymmetry | Frontier model | Same frontier model | No |
+| E2 | Double asymmetry | Frontier model | Weaker model | No |
+| E3 | Capability asymmetry | Frontier model | Weaker model | Yes |
+| E4 | Full symmetry | Frontier model | Same frontier model | Yes |
+
+The baselines define the floor and ceiling for Performance Gap Recovered
+(`PGR`):
+
+```text
+PGR = (debate_accuracy - blind_accuracy) / (oracle_accuracy - blind_accuracy)
+```
+
+The main baseline comparison uses the weaker judge because the central question
+is whether debate helps a weaker supervisor. If same-judge PGR is needed for E1
+and E4, run matching frontier-judge baselines as well.
+
+### Model Families
 
 The planned model families are:
 
@@ -70,30 +113,13 @@ The planned model families are:
 | OpenAI | `gpt-5.5` | `gpt-5.4-mini` |
 | Anthropic | `claude-opus-4-7` | `claude-sonnet-4-6` |
 
-E1 and E4 use the frontier model as judge. E2 and E3 use the weaker model as
-judge. The main blind/oracle baseline comparison is run with the weaker judge,
-because that is the headline oversight setting. To compute same-judge PGR for
-E1 and E4 as well, run matching frontier-judge baselines in the same baseline
-directory.
+E1 and E4 use the frontier model as final judge. E2 and E3 use the weaker model
+as final judge. The OpenAI weaker judge is `gpt-5.4-mini`; the Anthropic weaker
+judge is `claude-sonnet-4-6`.
 
-The experiment also runs blind and oracle baselines:
+### Pipeline
 
-- **Blind baseline:** judge sees only the question and two diagnoses.
-- **Oracle baseline:** judge sees the question, diagnoses, and patient evidence.
-
-Those baselines define the floor and ceiling used to compute Performance Gap
-Recovered, following Khan et al.
-
-Each debate is three rounds with a 150-word limit per debater per round. Debaters
-can cite the structured evidence using `<quote>` tags; quotes are verified
-against the patient evidence before the judge sees the transcript. Judging is
-run with answer letters swapped to reduce simple A/B positional bias.
-
-## Methodology
-
-The pipeline has three layers: dataset preparation, transcript generation, and
-judging/analysis. The diagram below shows the main API-bearing path for one
-model family.
+The main API-bearing path for one model family is:
 
 ```mermaid
 flowchart TD
@@ -104,8 +130,8 @@ flowchart TD
     D --> E2["baseline_oracle/data0.csv"]
     D --> F["debate_sim/data0.csv"]
 
-    E1 --> G1["Blind judge calls<br/>no-swap and swap"]
-    E2 --> G2["Oracle judge calls<br/>no-swap and swap"]
+    E1 --> G1["Blind judge calls<br/>original order and swapped order"]
+    E2 --> G2["Oracle judge calls<br/>original order and swapped order"]
     G1 --> H["baselines/results.csv"]
     G2 --> H
 
@@ -114,13 +140,13 @@ flowchart TD
     J --> K["Round 3"]
     K --> L["Cached debate transcript<br/>debate_sim/data0.csv"]
 
-    I -. each side .-> I1["Generate 4 candidate arguments"]
-    I1 -. each candidate .-> I2["Preference judge rates candidate"]
-    I2 -. best rating .-> I3["Selected argument enters transcript"]
+    I -. "each debater turn" .-> I1["Generate 4 candidate arguments"]
+    I1 -. "each candidate" .-> I2["Preference judge rates candidate"]
+    I2 -. "best candidate" .-> I3["Selected argument enters transcript"]
 
-    L --> M["E1-E4 final judges<br/>no-swap and swap"]
-    L --> N["Concession judge<br/>no-swap and swap"]
-    M --> O["results.csv"]
+    L --> M["E1-E4 final answer judges<br/>original order and swapped order"]
+    L --> N["Concession judge<br/>quality-control pass"]
+    M --> O["debate_sim/*/data0_judgement.csv"]
     N --> P["analysis/concession.csv"]
     O --> Q["aggregate_medical_results.py"]
     H --> Q
@@ -129,228 +155,345 @@ flowchart TD
     R --> T["analysis/*.csv and plots"]
 ```
 
-### Dataset Preparation
+The pipeline has three important persistence points:
 
-`scripts/prepare_ddxplus_debate_pilot.py` rebuilds the 100-case pilot from the
-DDXPlus release files. The selection is deterministic rather than a simple
-random sample: it keeps adult, evidence-rich cases where the true pathology and
-a plausible distractor are close in the DDXPlus differential distribution, then
-round-robins across pathologies. The A/B position of the true diagnosis is
-randomized with a fixed seed so the pilot is reproducible.
+- `data/ddxplus/ddxplus_debate_pilot_100.csv` is the source pilot dataset.
+- `exp/.../data0.csv` files are working files created by the inherited debate
+  machinery. They cache baseline rows and full debate transcripts.
+- `exp/.../*_judgement.csv`, `results.csv`, `analysis/`, and
+  `medical_results/` are downstream outputs that can be re-read without
+  repeating API calls.
 
-`core/load/medical.py` converts that prepared pilot into the internal experiment
-schema expected by the inherited debate machinery. That is why the run creates
-working files such as `baseline_blind/data0.csv` and `debate_sim/data0.csv`
-rather than writing directly into the source dataset.
+### Baseline Runs
 
-### Baselines
+Baselines are run before debate so that analysis can compare debate against a
+blind floor and oracle ceiling.
 
-The blind and oracle baselines are run before or alongside debate so later
-analysis can be regenerated without repeating API calls. The baseline runner
-creates:
+The baseline runner creates:
 
-- `baseline_blind/data0.csv` and `baseline_oracle/data0.csv`: working files with
-  the cases and zero-round transcripts.
-- `baseline_blind/<judge>/data0_judgement.csv` and
-  `baseline_oracle/<judge>/data0_judgement.csv`: judge outputs for the original
-  A/B ordering.
-- `baseline_blind/<judge>/data0_swap_judgement.csv` and
-  `baseline_oracle/<judge>/data0_swap_judgement.csv`: judge outputs after A/B
-  swap control.
-- `baselines/results.csv`: appended scoring summaries.
+- `baseline_blind/data0.csv`: zero-round working rows for the blind baseline.
+- `baseline_oracle/data0.csv`: zero-round working rows for the oracle baseline.
+- `baseline_blind/<judge>/data0_judgement.csv`: blind judgements in original
+  A/B order.
+- `baseline_blind/<judge>/data0_swap_judgement.csv`: blind judgements after A/B
+  answer swap.
+- `baseline_oracle/<judge>/data0_judgement.csv`: oracle judgements in original
+  A/B order.
+- `baseline_oracle/<judge>/data0_swap_judgement.csv`: oracle judgements after
+  A/B answer swap.
+- `baselines/results.csv`: scoring summaries appended by
+  `core.scoring.accuracy`.
 
-The headline baselines use the weaker judge because the main oversight question
-is whether debate helps a weaker supervisor. Matching frontier-judge baselines
-can also be run if same-judge PGR is needed for E1 and E4.
+The `data0.csv` files are not final result tables. They are cached experiment
+working files. The judgement CSVs and aggregate outputs are what downstream
+analysis reads.
 
-### Debate Generation And BoN
+### Debate Generation
 
-For each debate case, the frontier model argues both sides for three rounds.
-Each side uses `BoN=4` by default:
+Each debate has three rounds. Both debaters see the structured patient evidence;
+one is assigned the correct diagnosis and the other is assigned the plausible
+distractor. The debaters are prompted to argue for their assigned answer and to
+respond to the transcript so far, so each turn includes continuity from earlier
+turns.
 
-1. The debater generates four candidate arguments for its assigned diagnosis.
-2. A preference judge evaluates each candidate by temporarily inserting that
-   candidate into the current transcript and asking which answer, A or B, is
-   more likely correct.
-3. A candidate receives rating `1.0` if the preference judge chooses that
-   debater's assigned side, `0.0` if it chooses the opposing side, and `0.5` if
-   the response is unclear.
-4. The candidate with the highest rating is selected for the transcript.
+By default, each debater turn uses `BoN=4`:
 
-If multiple candidates tie for the highest rating, the current implementation
-selects the first tied candidate returned by the model/API adapter. This is a
-deterministic tie-break over the candidate order, not a second judging pass.
+1. The debater generates four candidate arguments for its assigned side.
+2. A preference judge temporarily inserts each candidate into the current
+   transcript.
+3. The preference judge says which answer, A or B, looks more likely correct.
+4. The candidate receives rating `1.0` if the preference judge chooses that
+   debater's side, `0.0` if it chooses the opposing side, and `0.5` if the
+   output is unclear.
+5. The highest-rated candidate is written into the transcript.
 
-The preference judge is not the same as the final answer judge. It is an
-internal selection mechanism used while constructing each debater's argument.
-The final answer judges only run after the full transcript has been generated.
+If multiple candidates tie for the top rating, the current implementation
+selects the first tied candidate in candidate order. There is no second
+tie-break judging pass.
+
+The preference judge is only an internal argument-selection mechanism. The
+final answer judges run after the full transcript has been generated.
+
+### Judges
+
+The experiment uses several judge roles:
+
+- **Baseline answer judge:** chooses A or B in the blind and oracle baselines.
+- **Preference judge:** rates candidate debater arguments during BoN selection.
+- **Final answer judge:** chooses A or B after seeing the completed debate
+  transcript under E1-E4.
+- **Concession judge:** checks whether either debater broke the setup by
+  conceding or arguing for the opposing side.
+
+The concession judge is a quality-control judge, not a diagnosis judge. It does
+not decide who won the debate.
 
 ### Quote Verification
 
-Debaters are instructed to cite evidence with `<quote>...</quote>` tags. Before
-the transcript is shown to any judge, `core/transcript_parser.py` checks each
-quote against the patient evidence using normalized exact substring matching.
-Matched quotes are rewritten as `<v_quote>...</v_quote>` and unmatched quotes as
-`<u_quote>...</u_quote>`. Judges are explicitly told to trust verified quotes
-and distrust unverified quotes.
+Debaters are instructed to cite patient evidence with `<quote>...</quote>` tags.
+Before a judge sees the transcript, deterministic code in
+`core/transcript_parser.py` checks whether each quote is an exact normalized
+substring of the patient evidence.
 
-This quote check is deterministic code, not an extra model judge. The analysis
-script later writes `analysis/quote_verification.csv` and
-`analysis/plots/06_quote_verification.png` so fabricated or unmatched quote
-rates can be inspected.
+Matched quotes are rewritten as:
 
-### Final Judging And Bias Controls
-
-After transcript generation, the same cached debate is re-judged under E1-E4.
-Each judgement is run twice: once in the original A/B order and once with the
-answer letters swapped. This reduces simple positional bias and gives the
-aggregator enough information to swap-average per-case correctness.
-
-A separate concession judge is then run as a quality-control check. It does not
-choose the diagnosis. Instead, it asks whether either debater broke the game by
-arguing for the opposing side. The analysis script writes:
-
-- `analysis/concession.csv`
-- `analysis/plots/05_concession_rate.png`
-- `analysis/debate_outcomes.csv`
-- `analysis/plots/07_debate_outcomes.png`
-
-The debate-outcomes plot gives the context needed for interpretation: how many
-debates were usable, how many were flagged as concessions, and how many were
-incomplete or missing concession judgement.
-
-### Aggregated Outputs
-
-`scripts/aggregate_medical_results.py` is a no-API analysis step. It rereads the
-cached judgement CSVs and writes:
-
-- `accuracy_by_condition.csv`: accuracy grouped by experimental condition
-  (`B1`, `B2`, `E1`-`E4`), model family, and judge.
-- `pgr_by_condition.csv`: Performance Gap Recovered relative to matching blind
-  and oracle baselines.
-- `per_case_lift.csv`: case-level debate accuracy joined to blind-baseline
-  accuracy, useful for seeing which cases debate fixed or broke.
-- `plots/01_accuracy_by_condition.png`
-- `plots/02_pgr_by_condition.png`
-- `plots/03_per_case_lift.png`
-
-## Dataset
-
-The current pilot uses **DDXPlus**, a public synthetic differential-diagnosis
-dataset. Each case contains a patient age/sex, a presenting complaint, a true
-pathology, a differential diagnosis distribution, and structured evidence such
-as symptoms and antecedent risk factors.
-
-This is deliberately not presented as real clinical chart review. DDXPlus is
-synthetic and structured; it does not contain long notes, labs, imaging, or real
-patient records. A positive result here would be evidence that the debate setup
-is worth testing on richer clinical data later, not evidence that it is ready
-for clinical use.
-
-## Current Status
-
-This repo is still in progress. The current artifact is a runnable experimental
-harness, not a finished empirical result. The medical pipeline is wired up, but
-the full 100-case experiment has not been completed yet.
-
-What is currently in place:
-
-- 100-case DDXPlus pilot dataset and loader
-- medical debate prompts and baseline prompts
-- four debate-condition configs
-- OpenAI and Anthropic adapter code updated for the intended model families
-- answer-letter swap judging to reduce positional bias
-- quote verification for evidence cited by debaters
-- scoring, aggregation, bias-control, transcript-export, and cost-summary scripts
-- regression tests for answer parsing
-
-What is still pending:
-
-- full 100-case runs across the planned model families
-- final baseline/debate result tables
-- final plots and write-up
-- additional validation on any model/API behavior that changes during the run
-
-No final empirical conclusion should be inferred from the repository yet.
-
-## What This Fork Adds
-
-Compared with the upstream debate codebase, this fork adds the pieces needed to
-run the medical oversight experiment end to end:
-
-- [`core/load/medical.py`](core/load/medical.py) converts the DDXPlus pilot CSV
-  into the internal question schema.
-- [`core/config/experiment/`](core/config/experiment/) contains the medical
-  baseline and E1-E4 debate configs.
-- [`core/config/experiment/debaters/medical_v1.yaml`](core/config/experiment/debaters/medical_v1.yaml)
-  contains the medical debater prompt.
-- [`scripts/prepare_ddxplus_debate_pilot.py`](scripts/prepare_ddxplus_debate_pilot.py)
-  rebuilds the pilot CSV from the raw DDXPlus release files.
-- [`scripts/run_medical_baselines.sh`](scripts/run_medical_baselines.sh) runs
-  blind and oracle baselines.
-- [`scripts/run_medical_debate.sh`](scripts/run_medical_debate.sh) runs debate
-  generation and re-judges the cached transcripts across E1-E4.
-- [`scripts/aggregate_medical_results.py`](scripts/aggregate_medical_results.py)
-  aggregates cached results into accuracy tables and, once matching baselines
-  exist, PGR and per-case lift tables.
-- [`scripts/analyze_medical_debate.py`](scripts/analyze_medical_debate.py)
-  summarizes verbosity, quote verification, and concession checks.
-- [`tests/test_accuracy.py`](tests/test_accuracy.py) pins answer-parsing edge
-  cases discovered during smoke testing.
-
-The QuALITY-era human-trial web app, tournament scripts, and unrelated upstream
-analysis tooling have been removed so this fork stays focused on the medical
-experiment.
-
-## Quickstart
-
-```bash
-virtualenv --python python3.11 .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Secrets live in a top-level SECRETS file:
-# API_KEY=<openai-key>
-# ANTHROPIC_API_KEY=<anthropic-key>
-# DEFAULT_ORG=
-
-# No API calls: sanity-check scoring.
-make test
-
-# Rebuild the prepared DDXPlus pilot if raw DDXPlus files are available locally.
-python scripts/prepare_ddxplus_debate_pilot.py
-
-# API calls: small baseline smoke using the OpenAI weaker judge (`gpt-5.4-mini`).
-./scripts/run_medical_baselines.sh 5 exp/medical_debate_smoke/baselines openai
-
-# API calls: small debate smoke on the OpenAI family. Aggregation reads the
-# matching baselines directory for PGR and per-case lift.
-./scripts/run_medical_debate.sh 1 exp/medical_debate_smoke openai exp/medical_debate_smoke/baselines
+```text
+<v_quote>...</v_quote>
 ```
 
-Use `anthropic` as the third argument to run the Anthropic family instead. The
-baseline runner defaults to the weaker judge for that family: `gpt-5.4-mini` for
-OpenAI and `claude-sonnet-4-6` for Anthropic. The debate runner uses the
-frontier/weak pair shown in the model-family table above, unless `FRONTIER` or
-`WEAKER` are explicitly overridden in the environment.
+Unmatched quotes are rewritten as:
 
-Full experiment runs are intentionally left out of the quickstart because they
-consume API credits and should only be launched once keys, quotas, and output
-directories have been checked.
+```text
+<u_quote>...</u_quote>
+```
 
-Generated experiment outputs are written under `exp/`, which is intentionally
-gitignored.
+Judges are told to trust verified quotes and distrust unverified quotes. This is
+not another model call; it is deterministic quote checking. The analysis script
+then reports verified and unverified quote rates.
+
+### Bias Controls And Quality Checks
+
+The current pipeline includes:
+
+- **Answer-position control:** final judging is run in original A/B order and
+  swapped A/B order.
+- **Swap-averaged accuracy:** aggregation collapses the original and swapped
+  passes into per-case accuracy.
+- **Quote verification:** fabricated or unsupported quotes are marked before
+  judging and summarized later.
+- **Verbosity analysis:** checks whether one side is systematically wordier.
+- **Concession analysis:** flags debates where a debater appears to concede or
+  argue for the other answer.
+- **Debate outcome counts:** reports usable, conceded, incomplete, and
+  unparsed debates.
+- **Cost summaries:** extracts API cost lines from Hydra logs.
+
+### Expected Outputs
+
+For a run such as:
+
+```bash
+./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+```
+
+the main outputs are:
+
+```text
+exp/medical_debate_n100/
+  baselines/openai/
+    baseline_blind/
+    baseline_oracle/
+    results.csv
+  openai/
+    debate_sim/
+      data0.csv
+      e1_info_asymmetry_<judge>/
+      e2_double_asymmetry_<judge>/
+      e3_capability_asymmetry_<judge>/
+      e4_full_symmetry_<judge>/
+      concession_<judge>/
+    analysis/
+      verbosity.csv
+      quote_verification.csv
+      concession.csv
+      debate_outcomes.csv
+      plots/
+    cost_summary.csv
+    one_debate_outputs.md
+  medical_results/
+    accuracy_by_condition.csv
+    pgr_by_condition.csv
+    per_case_lift.csv
+    baselines_by_arm.csv
+    plots/
+```
+
+Generated outputs live under `exp/`, which is intentionally gitignored.
+
+## Results
+
+Pending. This section should be filled only after the full planned runs have
+completed and the cached outputs have been inspected. No empirical conclusion
+should be inferred from the repository yet.
+
+## Pending
+
+- Run the full 100-case OpenAI family experiment.
+- Run the full 100-case Anthropic family experiment.
+- Inspect debate transcripts and concession flags before reporting headline
+  accuracy.
+- Populate final result tables and plots from cached outputs.
+- Add a brief local Streamlit viewer for education and demo purposes. The first
+  version should read existing `exp/` outputs rather than launch expensive API
+  jobs.
+- Consider a paired bootstrap or McNemar-style analysis for per-case lift once
+  the full runs are complete.
+- Re-check model identifiers, pricing, and API behavior before any public
+  final write-up.
+
+## How To Run
+
+### Requirements
+
+You need:
+
+- Python 3.11.
+- A Unix-like shell environment.
+- OpenAI API access.
+- Anthropic API access if running the Anthropic family.
+- The committed DDXPlus pilot CSV, or local raw DDXPlus release files if you
+  want to rebuild it.
+
+The current API wrapper reads secrets from a top-level `SECRETS` file. Create
+one like this:
+
+```text
+API_KEY=<openai-key>
+ANTHROPIC_API_KEY=<anthropic-key>
+DEFAULT_ORG=
+```
+
+`DEFAULT_ORG` can be left blank if you do not need to set an OpenAI
+organization. Keep an `ANTHROPIC_API_KEY=` line even for OpenAI-only runs,
+because the shared secrets loader expects the key to exist. Anthropic runs need
+a real Anthropic key. Keep `SECRETS` local; it is ignored by Git.
+
+### Install
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Optional developer hooks:
+
+```bash
+make hooks
+```
+
+Local no-API parser test:
+
+```bash
+make test
+```
+
+### One-Command Run
+
+For a one-case smoke test:
+
+```bash
+./scripts/run_medical_full.sh 1 openai exp/medical_debate_smoke
+```
+
+For the planned OpenAI 100-case run:
+
+```bash
+./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+```
+
+For the planned Anthropic 100-case run:
+
+```bash
+./scripts/run_medical_full.sh 100 anthropic exp/medical_debate_n100
+```
+
+The wrapper script:
+
+1. Runs the local parser test unless `RUN_TESTS=0`.
+2. Checks that the prepared DDXPlus pilot exists, rebuilding it if needed and
+   raw files are available.
+3. Runs blind and oracle baselines.
+4. Runs debate transcript generation.
+5. Runs E1-E4 final judging.
+6. Runs concession judging.
+7. Runs bias-control analysis, aggregation, cost summary, and transcript export.
+
+Useful overrides:
+
+```bash
+THREADS=2 ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+RUN_TESTS=0 ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+PREPARE_DATA=1 ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+FRONTIER=gpt-5.5 WEAKER=gpt-5.4-mini ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+```
+
+Use a small smoke test first. The full run makes many API calls because each
+debate turn uses BoN candidate generation and preference judging.
+
+### Manual Run
+
+If you prefer to run each stage yourself:
+
+```bash
+# 1. Optional: rebuild the prepared pilot from raw DDXPlus files.
+python scripts/prepare_ddxplus_debate_pilot.py
+
+# 2. Run blind and oracle baselines.
+./scripts/run_medical_baselines.sh \
+  100 \
+  exp/medical_debate_n100/baselines/openai \
+  openai
+
+# 3. Run debate generation, E1-E4 judging, concession checks, analysis, and export.
+./scripts/run_medical_debate.sh \
+  100 \
+  exp/medical_debate_n100 \
+  openai \
+  exp/medical_debate_n100/baselines/openai
+```
+
+Replace `openai` with `anthropic` for the Anthropic model family.
+
+### Re-Run Analysis Without API Calls
+
+Once the judgement CSVs exist, you can regenerate analysis without repeating the
+expensive model calls:
+
+```bash
+python scripts/analyze_medical_debate.py exp/medical_debate_n100/openai
+
+python scripts/aggregate_medical_results.py \
+  exp/medical_debate_n100/openai \
+  --baselines-dir exp/medical_debate_n100/baselines/openai \
+  --out-dir exp/medical_debate_n100/medical_results
+
+python scripts/summarise_run_costs.py exp/medical_debate_n100/openai
+
+python scripts/export_medical_debate_output.py \
+  exp/medical_debate_n100/openai \
+  --limit 100 \
+  --family openai
+```
+
+### Script Map
+
+| File | Purpose |
+|---|---|
+| `scripts/run_medical_full.sh` | One-command wrapper for baselines, debate, judging, analysis, and export. |
+| `scripts/prepare_ddxplus_debate_pilot.py` | Rebuilds the deterministic 100-case DDXPlus pilot. |
+| `scripts/run_medical_baselines.sh` | Runs blind and oracle baselines for one model family. |
+| `scripts/run_medical_debate.sh` | Generates debate transcripts, runs E1-E4 final judges, concession checks, analysis, aggregation, cost summary, and export. |
+| `scripts/analyze_medical_debate.py` | Produces verbosity, quote verification, concession, and debate-outcome outputs. |
+| `scripts/aggregate_medical_results.py` | Produces accuracy, PGR, per-case lift tables, and result plots from cached judgement CSVs. |
+| `scripts/summarise_run_costs.py` | Extracts API spend from Hydra logs into `cost_summary.csv`. |
+| `scripts/export_medical_debate_output.py` | Writes a readable Markdown export of one debate and its judgements. |
+| `tests/test_accuracy.py` | Regression tests for parsing judge answers. |
 
 ## Relationship To Upstream
 
-This is a focused research fork of `ucl-dark/llm_debate`. The original codebase
+This is a focused research fork of `ucl-dark/llm_debate`. The upstream codebase
 provided the debate framework, rollouts, judge/debater abstractions, scoring
-patterns, and the inspiration for the experimental design. This fork strips out
-much of the QuALITY/human-trial tooling and adds the medical dataset pipeline,
-medical prompts, updated model adapters, and analysis scripts for the DDXPlus
-experiment.
+patterns, and the original experimental inspiration. This fork removes much of
+the QuALITY-era human-trial and tournament tooling, then adds the medical
+dataset loader, DDXPlus pilot preparation, medical prompts, model-family
+configuration, OpenAI/Anthropic adapter updates, swap judging, quote
+verification, concession analysis, result aggregation, and run scripts needed
+for the medical oversight experiment.
 
-The upstream paper is included as [`paper.pdf`](paper.pdf).
+The upstream paper is available on arXiv:
+[`2402.06782`](https://arxiv.org/abs/2402.06782).
 
 ## Acknowledgements
 

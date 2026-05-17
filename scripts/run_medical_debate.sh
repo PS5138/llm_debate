@@ -7,7 +7,7 @@
 # Examples:
 #   ./scripts/run_medical_debate.sh 1 exp/medical_debate_smoke openai
 #   ./scripts/run_medical_debate.sh 20 exp/medical_debate_n20 openai
-#   ./scripts/run_medical_debate.sh 100 exp/medical_debate_n100 openai exp/medical_debate_n100/baselines
+#   ./scripts/run_medical_debate.sh 100 exp/medical_debate_n100 openai exp/medical_debate_n100/baselines/openai
 
 set -euo pipefail
 
