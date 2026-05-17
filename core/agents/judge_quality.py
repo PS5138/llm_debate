@@ -16,11 +16,20 @@ LOGGER = logging.getLogger(__name__)
 class JudgeQuality(JudgeBase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._use_logprobs = bool(
+            self.config.use_logprobs
+            and self.config.language_model.model.startswith("gpt-")
+            and not self.config.language_model.model.startswith("gpt-5")
+        )
         if self.config.use_logprobs:
-            assert self.config.language_model.model.startswith(
-                "gpt-"
-            ), "Logprob preference judging is only supported for OpenAI models"
-            LOGGER.info(f"Using logprobs: {self.config.use_logprobs}")
+            if self._use_logprobs:
+                LOGGER.info("Using logprobs for preference judging")
+            else:
+                LOGGER.info(
+                    "Logprob preference judging is not available for "
+                    f"{self.config.language_model.model}; falling back to "
+                    "text A/B preference judgements."
+                )
 
     def swap_transcript(self, transcript: TranscriptConfig) -> TranscriptConfig:
         swapped_transcript = copy.deepcopy(transcript).dict()
@@ -181,7 +190,7 @@ class JudgeQuality(JudgeBase):
         messages = self.construct_messages(transcript)
 
         try:
-            if not self.config.use_logprobs:
+            if not self._use_logprobs:
                 response = await self.api_handler.call_single(
                     prompt=messages,
                     model_ids=self.config.language_model.model,
@@ -247,9 +256,7 @@ class JudgeQuality(JudgeBase):
 
         messages = self.construct_messages(new_transcript)
 
-        if not self.config.use_logprobs or self.config.language_model.model.startswith(
-            "gpt-5"
-        ):
+        if not self._use_logprobs:
             response = await self.api_handler.call_single(
                 model_ids=self.config.language_model.model,
                 prompt=messages,

@@ -6,14 +6,20 @@
 #
 # Examples:
 #   ./scripts/run_medical_baselines.sh 20
-#   ./scripts/run_medical_baselines.sh 100 exp/medical_debate_n100/baselines/openai openai
-#   ./scripts/run_medical_baselines.sh 100 exp/medical_debate_n100/baselines/anthropic anthropic
+#   RUN_ROOT="$(./scripts/create_results_dir.sh)"
+#   ./scripts/run_medical_baselines.sh 100 "$RUN_ROOT/baselines/openai" openai
+#   ./scripts/run_medical_baselines.sh 100 "$RUN_ROOT/baselines/anthropic" anthropic
 
 set -euo pipefail
 
 LIMIT="${1:-100}"
-EXP_DIR="${2:-exp/medical_pilot_n${LIMIT}}"
-FAMILY="${3:-openai}"
+FAMILY="${3:-${FAMILY:-openai}}"
+if [[ $# -ge 2 && -n "${2:-}" ]]; then
+  EXP_DIR="$2"
+else
+  RUN_ROOT="${RUN_ROOT:-$(./scripts/create_results_dir.sh)}"
+  EXP_DIR="${RUN_ROOT}/baselines/${FAMILY}"
+fi
 THREADS="${THREADS:-5}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 

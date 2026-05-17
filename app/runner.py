@@ -1,13 +1,14 @@
-"""Ephemeral pipeline runner for the Streamlit demo.
+"""Pipeline runner for the Streamlit demo.
 
-Each `DebateRun` owns a tempdir, a session-scoped SECRETS file containing
-the user-supplied keys, and a background thread that drives the medical
-debate pipeline stage by stage. Progress is exposed through `snapshot()`
-so the Streamlit UI can render a live status table without holding the
-subprocess.
+Each `DebateRun` owns a timestamped results directory under `exp/`, plus
+a tempdir for session-scoped secrets and transient logs. A background
+thread drives the medical debate pipeline stage by stage. Progress is
+exposed through `snapshot()` so the Streamlit UI can render a live status
+table without holding the subprocess.
 
-Outputs are isolated in the run tempdir. `cleanup()` removes that tempdir
-and the session SECRETS file; the keys never touch the user's repo SECRETS.
+Experiment outputs persist under `exp/YYYY-MM-DD_HH-MM-SS_results/`.
+`cleanup()` removes only the tempdir and the session SECRETS file; the
+keys never touch the user's repo SECRETS.
 """
 
 from __future__ import annotations
@@ -45,6 +46,19 @@ COST_PER_CASE_USD = {
 }
 
 CONDITIONS = ["e1_info_asymmetry", "e2_double_asymmetry", "e3_capability_asymmetry", "e4_full_symmetry"]
+
+
+def create_results_root(base_dir: Path = REPO_ROOT / "exp") -> Path:
+    """Create a fresh timestamped results directory under exp/."""
+    base_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    candidate = base_dir / f"{stamp}_results"
+    suffix = 2
+    while candidate.exists():
+        candidate = base_dir / f"{stamp}_results_{suffix}"
+        suffix += 1
+    candidate.mkdir(parents=True)
+    return candidate
 
 
 class Phase(str, Enum):
@@ -127,13 +141,13 @@ class DebateRun:
         except OSError:
             pass
 
-        self.exp_root = self._tempdir / "exp"
-        self.exp_root.mkdir(parents=True, exist_ok=True)
-        self.exp_dir = self.exp_root / "debate_run"
+        self.exp_root = create_results_root()
+        self.exp_dir = self.exp_root
         self.baselines_dir = self.exp_dir / "baselines" / family
         self.family_dir = self.exp_dir / family
         self.results_dir = self.exp_dir / "medical_results"
         self.log_path = self._tempdir / "pipeline.log"
+        self._write_run_metadata("app/streamlit_app.py")
 
         self._lock = threading.Lock()
         self._phase = Phase.PENDING
@@ -165,6 +179,36 @@ class DebateRun:
             self._initial_cases = []
 
     # ---------------------------------------------------------------- lifecycle
+
+    def _write_run_metadata(self, entrypoint: str) -> None:
+        models = FAMILY_MODELS[self.family]
+        recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        family_record = {
+            "family": self.family,
+            "n_cases": self.n_cases,
+            "frontier_model": models["frontier"],
+            "weaker_model": models["weaker"],
+            "concession_model": self.concession_model,
+            "entrypoint": entrypoint,
+            "family_dir": str(self.family_dir),
+            "baselines_dir": str(self.baselines_dir),
+            "recorded_at_utc": recorded_at,
+        }
+        self.family_dir.mkdir(parents=True, exist_ok=True)
+        (self.family_dir / "run_metadata.json").write_text(
+            json.dumps(family_record, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        root_record = {
+            "run_root": str(self.exp_dir),
+            "created_or_updated_at_utc": recorded_at,
+            "last_updated_at_utc": recorded_at,
+            "families": {self.family: family_record},
+        }
+        (self.exp_dir / "run_metadata.json").write_text(
+            json.dumps(root_record, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def start(self) -> None:
         with self._lock:

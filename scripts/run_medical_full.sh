@@ -5,9 +5,10 @@
 #   ./scripts/run_medical_full.sh [N] [FAMILY] [EXP_ROOT]
 #
 # Examples:
-#   ./scripts/run_medical_full.sh 1 openai exp/medical_debate_smoke
-#   ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
-#   ./scripts/run_medical_full.sh 100 anthropic exp/medical_debate_n100
+#   ./scripts/run_medical_full.sh 1 openai
+#   ./scripts/run_medical_full.sh 100 openai
+#   ./scripts/run_medical_full.sh 100 anthropic
+#   ./scripts/run_medical_full.sh 100 openai exp/2026-05-17_19-30-00_results
 #
 # Useful environment overrides:
 #   THREADS=2                      lower API concurrency
@@ -21,7 +22,15 @@ set -euo pipefail
 
 LIMIT="${1:-100}"
 FAMILY="${2:-openai}"
-EXP_ROOT="${3:-exp/medical_debate_n${LIMIT}}"
+if [[ $# -ge 3 && -n "${3:-}" ]]; then
+  EXP_ROOT="$3"
+elif [[ -n "${EXP_ROOT:-}" ]]; then
+  EXP_ROOT="$EXP_ROOT"
+elif [[ -n "${RUN_ROOT:-}" ]]; then
+  EXP_ROOT="$RUN_ROOT"
+else
+  EXP_ROOT="$(./scripts/create_results_dir.sh)"
+fi
 BASELINES_DIR="${BASELINES_DIR:-${EXP_ROOT}/baselines/${FAMILY}}"
 THREADS="${THREADS:-5}"
 PYTHON="${PYTHON:-.venv/bin/python}"
@@ -66,6 +75,7 @@ fi
 
 export THREADS
 export PYTHON
+export RUN_ROOT="$EXP_ROOT"
 
 PILOT_CSV="data/ddxplus/ddxplus_debate_pilot_100.csv"
 RAW_PATIENTS="data/ddxplus/release_test_patients"

@@ -13,7 +13,7 @@ reconciliation against the predicted budget see §6.4 of the funding doc
 and the Phase E7 entry in PLAN.md.
 
 Usage:
-    python scripts/summarise_run_costs.py exp/medical_debate_n100/openai
+    python scripts/summarise_run_costs.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
 """
 
 from __future__ import annotations

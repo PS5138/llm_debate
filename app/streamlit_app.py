@@ -2,7 +2,8 @@
 
 Bring your own API key, pick how many cases to run, watch debates fill in
 row by row, click a case to see its transcript and the judge's pick under
-each arm. Runs are isolated in a tempdir and can be deleted with Clear run.
+each arm. Each run writes outputs to a fresh timestamped folder under exp/.
+Temporary secrets and process logs are isolated in a tempdir.
 """
 
 from __future__ import annotations
@@ -185,29 +186,30 @@ with st.sidebar:
             "▶ Run",
             type="primary",
             disabled=is_active,
-            use_container_width=True,
+            width="stretch",
         )
     with col_b:
         stop_clicked = st.button(
             "⏹ Stop",
             disabled=not is_active,
-            use_container_width=True,
+            width="stretch",
         )
 
     st.caption(
         "Stop cancels the current run. If you click Run again afterwards, "
-        "the app starts from the beginning in a fresh tempdir rather than "
-        "resuming partial work."
+        "the app starts from the beginning in a fresh results folder rather "
+        "than resuming partial work."
     )
 
-    reset_clicked = st.button("Clear run (delete temp files)", use_container_width=True)
+    reset_clicked = st.button("Clear run (keep exp outputs)", width="stretch")
 
     st.divider()
     st.caption(
         "Keys live in this session only. They are written to a "
         "tempfile inside the run tempdir. Clear run stops the run and "
-        "deletes the tempdir. Nothing is sent anywhere except the "
-        "chosen model providers."
+        "deletes the temp secrets/logs, while leaving the run outputs "
+        "under exp/. Nothing is sent anywhere except the chosen model "
+        "providers."
     )
 
 
@@ -275,6 +277,9 @@ with c3:
 if snap.phase == Phase.ERROR:
     st.error(snap.message)
 
+if snap.exp_dir:
+    st.caption(f"Run output folder: `{snap.exp_dir}`")
+
 
 # ---- table ----------------------------------------------------------------
 
@@ -311,7 +316,7 @@ else:
     df = pd.DataFrame(case_rows)
     st.dataframe(
         df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "case_id": st.column_config.TextColumn("case", width="small"),
@@ -377,7 +382,7 @@ if selected:
                     "result": verdict,
                 }
             )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 # ---- aggregate results ----------------------------------------------------
@@ -393,15 +398,15 @@ if snap.phase == Phase.DONE and snap.results_dir:
     with cols[0]:
         if acc_path.exists():
             st.markdown("**Accuracy by condition**")
-            st.dataframe(pd.read_csv(acc_path), use_container_width=True, hide_index=True)
+            st.dataframe(pd.read_csv(acc_path), width="stretch", hide_index=True)
     with cols[1]:
         if pgr_path.exists():
             st.markdown("**PGR by condition**")
-            st.dataframe(pd.read_csv(pgr_path), use_container_width=True, hide_index=True)
+            st.dataframe(pd.read_csv(pgr_path), width="stretch", hide_index=True)
 
     if plots_dir.exists():
         for png in sorted(plots_dir.glob("*.png")):
-            st.image(str(png), use_container_width=True)
+            st.image(str(png), width="stretch")
 
 
 # ---- raw log --------------------------------------------------------------

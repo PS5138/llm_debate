@@ -15,10 +15,11 @@ Reads the cached judgement CSVs under one or more exp_dirs and emits:
 This is pure data manipulation — no API calls. Safe to run repeatedly.
 
 Usage:
-    python scripts/aggregate_medical_results.py exp/medical_debate_n100/openai
-    python scripts/aggregate_medical_results.py exp/medical_debate_n100/openai \\
-                                                exp/medical_debate_n100/anthropic
-    python scripts/aggregate_medical_results.py --plots-only exp/medical_debate_n100/openai
+    python scripts/aggregate_medical_results.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
+    python scripts/aggregate_medical_results.py exp/YYYY-MM-DD_HH-MM-SS_results/openai \\
+                                                exp/YYYY-MM-DD_HH-MM-SS_results/anthropic \\
+                                                --baselines-dir exp/YYYY-MM-DD_HH-MM-SS_results/baselines
+    python scripts/aggregate_medical_results.py --plots-only exp/YYYY-MM-DD_HH-MM-SS_results/openai
 """
 
 from __future__ import annotations
@@ -149,6 +150,30 @@ def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
                         }
                     )
     return pd.DataFrame(rows)
+
+
+def _scan_baselines_for_families(
+    baselines_dir: Optional[Path],
+    family_dirs: list[Path],
+) -> pd.DataFrame:
+    """Collect baselines for each family.
+
+    `baselines_dir` can be either:
+      - a family-specific directory, e.g. run/baselines/openai
+      - a parent directory with family subdirs, e.g. run/baselines
+    """
+    if not baselines_dir or not family_dirs:
+        return pd.DataFrame()
+
+    frames: list[pd.DataFrame] = []
+    for family_dir in family_dirs:
+        family_label = _family_label_from_path(family_dir)
+        family_baselines = baselines_dir / family_label
+        target = family_baselines if family_baselines.exists() else baselines_dir
+        df = _scan_baselines(target, family_label)
+        if not df.empty:
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -449,11 +474,7 @@ def main(family_dirs: list[Path], baselines_dir: Optional[Path], out_dir: Path, 
         ignore_index=True,
     ) if family_dirs else pd.DataFrame()
 
-    baselines_per_case = (
-        _scan_baselines(baselines_dir, _family_label_from_path(family_dirs[0]))
-        if (baselines_dir and family_dirs)
-        else pd.DataFrame()
-    )
+    baselines_per_case = _scan_baselines_for_families(baselines_dir, family_dirs)
 
     per_case_agg = _swap_average(per_case_all) if not per_case_all.empty else pd.DataFrame()
     baselines_case_agg = _swap_average(baselines_per_case) if not baselines_per_case.empty else pd.DataFrame()
@@ -490,7 +511,7 @@ if __name__ == "__main__":
         "family_dirs",
         nargs="+",
         type=Path,
-        help="One or more family directories, e.g. exp/medical_debate_n100/openai",
+        help="One or more family directories, e.g. exp/YYYY-MM-DD_HH-MM-SS_results/openai",
     )
     parser.add_argument(
         "--baselines-dir",

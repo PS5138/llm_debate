@@ -292,18 +292,20 @@ The current pipeline includes:
 For a run such as:
 
 ```bash
-./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+./scripts/run_medical_full.sh 100 openai
 ```
 
 the main outputs are:
 
 ```text
-exp/medical_debate_n100/
+exp/YYYY-MM-DD_HH-MM-SS_results/
+  run_metadata.json
   baselines/openai/
     baseline_blind/
     baseline_oracle/
     results.csv
   openai/
+    run_metadata.json
     debate_sim/
       data0.csv
       e1_info_asymmetry_<judge>/
@@ -327,7 +329,39 @@ exp/medical_debate_n100/
     plots/
 ```
 
-Generated outputs live under `exp/`, which is intentionally gitignored.
+Generated outputs live under a fresh timestamped folder in `exp/`, which is
+intentionally gitignored while experiments are in progress. For final release,
+commit only the curated final results folder you want readers to inspect.
+
+### Sampling And Token Settings
+
+The YAML configs use the same intended sampling settings across model families,
+but the API adapters normalize them where providers differ.
+
+- **Debater argument generation:** `temperature=0.8`, `top_p=1.0`,
+  `max_tokens=1000`, `min_words=70`, `max_words=150`, `BoN=4`. This is the
+  creative part of the pipeline: each debater samples four candidate arguments,
+  then a preference judge selects the best candidate for the visible transcript.
+- **Preference judge for BoN selection:** `temperature=0.0`, `top_p=1.0`,
+  `max_tokens=2` in config. GPT-5-family OpenAI calls are routed through text
+  A/B preference judgements and the adapter enforces the provider's minimum
+  completion-token floor. Anthropic calls also use text A/B preference
+  judgements because Anthropic does not expose OpenAI-style logprobs here.
+- **Blind/oracle baselines and E1-E4 final judges:** `temperature=0.0`,
+  `top_p=1.0`, and `max_tokens=null`. OpenAI receives no explicit output cap
+  when the cap is `null`; Anthropic receives the shared wrapper default of
+  `2000` output tokens.
+- **Concession judge:** `gpt-4o-mini`, `temperature=0.0`, `top_p=1.0`,
+  `max_tokens=1`. This is only a Y/N quality-control pass, not a diagnosis
+  judge.
+
+Provider-specific differences:
+
+- Anthropic Claude 4.x rejects requests that specify both `temperature` and
+  `top_p`, so the Anthropic adapter keeps `temperature` and drops `top_p`.
+- GPT-5-family OpenAI calls in this repo drop `temperature` and `top_p` in the
+  adapter, because those models are handled through a stricter request shape in
+  the current legacy OpenAI SDK path.
 
 ## Results
 
@@ -413,8 +447,8 @@ There are three ways to use this repo:
 ### Interactive Frontend
 
 There is a small local frontend for exploring the pipeline live. It is meant for
-**education and exploration**, not for batch experiments. Anything you run is
-isolated to a temporary run directory.
+**education and exploration**, not for batch experiments. Each run writes
+outputs to a fresh timestamped folder under `exp/`.
 
 ```bash
 streamlit run app/streamlit_app.py
@@ -428,18 +462,17 @@ What it does:
   are written to a session-scoped tempfile, never to your repo `SECRETS`.
 - Hit **Run**. The app shells out to the same pipeline stages the CLI uses
   (baselines → debate → E1-E4 final judging → concession judge → analysis →
-  aggregation) under a fresh tempdir.
+  aggregation) under a fresh `exp/YYYY-MM-DD_HH-MM-SS_results/` folder.
 - The case table fills in row by row as debates complete. Pick any case to
   read the full transcript (Round 1, 2, 3 with both debaters labelled) and
   see which side each E1-E4 judge picked under the original and swapped A/B
   orderings.
 - When the run finishes, the bottom of the page shows the aggregate
   accuracy/PGR tables and the generated plots from `medical_results/`.
-- **Clear run** deletes the tempdir, the session SECRETS, and any partial
-  outputs. Use Clear run for immediate cleanup; closing a browser tab does not
-  always give Streamlit a chance to clean up instantly.
-- **Stop** cancels the current run. Starting again creates a fresh tempdir and
-  begins from baselines; the demo does not resume partial runs.
+- **Clear run** deletes only the temporary session SECRETS/log files and leaves
+  the timestamped `exp/` output folder in place.
+- **Stop** cancels the current run. Starting again creates a fresh results
+  folder and begins from baselines; the demo does not resume partial runs.
 
 Things to know before clicking **Run**:
 
@@ -449,36 +482,60 @@ Things to know before clicking **Run**:
 - **The OpenAI key is always required** because the concession (quality
   control) judge uses `gpt-4o-mini` regardless of family. The Anthropic key
   is only needed if you pick the `anthropic` family.
-- Nothing is written to tracked repo output paths. There is no database, no
-  upload, and no shared state between sessions — every run is isolated to a
-  local tempdir and the user's own key.
+- Results are written under `exp/`, which is gitignored during development.
+  There is no database, no upload, and no shared state between sessions. Every
+  run gets a new local results folder and uses the user's own key.
 - The app uses the same `data/ddxplus/ddxplus_debate_pilot_100.csv` that is
   committed to this repo. It does not accept arbitrary CSV uploads.
 
 The full experiment outputs are not committed yet. Once the full runs are
-complete, the intended published results will live under `exp/` or an equivalent
-release artifact; until then, the app is for people who want to drive a fresh
-run themselves.
+complete, keep only the curated final results folder under `exp/` for GitHub;
+delete smoke-test folders before publishing.
 
 ### One-Command Run
 
 For a one-case smoke test:
 
 ```bash
-./scripts/run_medical_full.sh 1 openai exp/medical_debate_smoke
+./scripts/run_medical_full.sh 1 openai
 ```
 
 For the planned OpenAI 100-case run:
 
 ```bash
-./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+./scripts/run_medical_full.sh 100 openai
 ```
 
 For the planned Anthropic 100-case run:
 
 ```bash
-./scripts/run_medical_full.sh 100 anthropic exp/medical_debate_n100
+./scripts/run_medical_full.sh 100 anthropic
 ```
+
+If you do not pass an output path, the wrapper creates a fresh folder like
+`exp/2026-05-17_19-30-00_results/`. If you intentionally want to reuse or
+resume a specific run folder, pass it as the third argument:
+
+```bash
+./scripts/run_medical_full.sh 100 openai exp/2026-05-17_19-30-00_results
+```
+
+To put both families in the same final results folder, create the folder once
+and pass it to both wrapper calls:
+
+```bash
+RUN_ROOT="$(./scripts/create_results_dir.sh)"
+./scripts/run_medical_full.sh 100 openai "$RUN_ROOT"
+./scripts/run_medical_full.sh 100 anthropic "$RUN_ROOT"
+```
+
+The second call will keep the existing family outputs and regenerate
+`$RUN_ROOT/medical_results/` using all completed family directories it finds.
+Raw family outputs are separated under `$RUN_ROOT/openai/`,
+`$RUN_ROOT/anthropic/`, `$RUN_ROOT/baselines/openai/`, and
+`$RUN_ROOT/baselines/anthropic/`; only the shared aggregate
+`$RUN_ROOT/medical_results/` is rewritten so it reflects the currently
+available families.
 
 The wrapper script:
 
@@ -494,10 +551,10 @@ The wrapper script:
 Useful overrides:
 
 ```bash
-THREADS=2 ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
-RUN_TESTS=0 ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
-PREPARE_DATA=1 ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
-FRONTIER=gpt-5.5 WEAKER=gpt-5.4-mini ./scripts/run_medical_full.sh 100 openai exp/medical_debate_n100
+THREADS=2 ./scripts/run_medical_full.sh 100 openai
+RUN_TESTS=0 ./scripts/run_medical_full.sh 100 openai
+PREPARE_DATA=1 ./scripts/run_medical_full.sh 100 openai
+FRONTIER=gpt-5.5 WEAKER=gpt-5.4-mini ./scripts/run_medical_full.sh 100 openai
 ```
 
 Use a small smoke test first. The full run makes many API calls because each
@@ -508,21 +565,24 @@ debate turn uses BoN candidate generation and preference judging.
 If you prefer to run each stage yourself:
 
 ```bash
+# 0. Create one fresh results folder and reuse it for all manual stages.
+RUN_ROOT="$(./scripts/create_results_dir.sh)"
+
 # 1. Optional: rebuild the prepared pilot from raw DDXPlus files.
 python scripts/prepare_ddxplus_debate_pilot.py
 
 # 2. Run blind and oracle baselines.
 ./scripts/run_medical_baselines.sh \
   100 \
-  exp/medical_debate_n100/baselines/openai \
+  "$RUN_ROOT/baselines/openai" \
   openai
 
 # 3. Run debate generation, E1-E4 judging, concession checks, analysis, and export.
 ./scripts/run_medical_debate.sh \
   100 \
-  exp/medical_debate_n100 \
+  "$RUN_ROOT" \
   openai \
-  exp/medical_debate_n100/baselines/openai
+  "$RUN_ROOT/baselines/openai"
 ```
 
 Replace `openai` with `anthropic` for the Anthropic model family.
@@ -533,17 +593,17 @@ Once the judgement CSVs exist, you can regenerate analysis without repeating the
 expensive model calls:
 
 ```bash
-python scripts/analyze_medical_debate.py exp/medical_debate_n100/openai
+python scripts/analyze_medical_debate.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
 
 python scripts/aggregate_medical_results.py \
-  exp/medical_debate_n100/openai \
-  --baselines-dir exp/medical_debate_n100/baselines/openai \
-  --out-dir exp/medical_debate_n100/medical_results
+  exp/YYYY-MM-DD_HH-MM-SS_results/openai \
+  --baselines-dir exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai \
+  --out-dir exp/YYYY-MM-DD_HH-MM-SS_results/medical_results
 
-python scripts/summarise_run_costs.py exp/medical_debate_n100/openai
+python scripts/summarise_run_costs.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
 
 python scripts/export_medical_debate_output.py \
-  exp/medical_debate_n100/openai \
+  exp/YYYY-MM-DD_HH-MM-SS_results/openai \
   --limit 100 \
   --family openai
 ```
@@ -553,8 +613,10 @@ python scripts/export_medical_debate_output.py \
 | File | Purpose |
 |---|---|
 | `app/streamlit_app.py` | Local frontend: live row-by-row debate viewer and aggregate dashboard. |
-| `app/runner.py` | Ephemeral pipeline runner used by the local frontend. |
+| `app/runner.py` | Pipeline runner used by the local frontend; writes runs under timestamped `exp/` folders. |
 | `scripts/run_medical_full.sh` | One-command wrapper for baselines, debate, judging, analysis, and export. |
+| `scripts/create_results_dir.sh` | Creates a fresh `exp/YYYY-MM-DD_HH-MM-SS_results/` folder for manual runs. |
+| `scripts/write_run_metadata.py` | Records family/model settings in `run_metadata.json`. |
 | `scripts/prepare_ddxplus_debate_pilot.py` | Rebuilds the deterministic 100-case DDXPlus pilot. |
 | `scripts/run_medical_baselines.sh` | Runs blind and oracle baselines for one model family. |
 | `scripts/run_medical_debate.sh` | Generates debate transcripts, runs E1-E4 final judges, concession checks, analysis, aggregation, cost summary, and export. |

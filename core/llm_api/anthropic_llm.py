@@ -22,7 +22,7 @@ from traceback import format_exc
 from typing import Optional, Union
 
 import attrs
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, BadRequestError
 from termcolor import cprint
 
 from core.llm_api.base_llm import (
@@ -206,6 +206,11 @@ class AnthropicChatModel(ModelAPIProtocol):
         # Allow-list of Anthropic Messages API parameters.
         allowed = {"temperature", "top_p", "top_k", "stop_sequences", "metadata"}
         call_kwargs = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+        # Claude 4.x rejects requests that specify both sampling controls.
+        # The repo configs always set top_p=1.0, so keep the intentional
+        # temperature setting and omit top_p for Anthropic calls.
+        if "temperature" in call_kwargs and "top_p" in call_kwargs:
+            call_kwargs.pop("top_p")
         if system is not None:
             call_kwargs["system"] = system
         call_kwargs["max_tokens"] = max_tokens
@@ -241,9 +246,13 @@ class AnthropicChatModel(ModelAPIProtocol):
         if messages and messages[0].get("role") != "user":
             messages.insert(0, {"role": "user", "content": "[continue]"})
 
-        # max_tokens handling. Anthropic requires it; some callers pass None.
+        # max_tokens handling. The shared wrapper historically used
+        # Anthropic's legacy name, while the Messages API uses max_tokens.
         max_tokens = kwargs.pop("max_tokens", None)
-        if not max_tokens or max_tokens < 8:
+        legacy_max_tokens = kwargs.pop("max_tokens_to_sample", None)
+        if max_tokens is None:
+            max_tokens = legacy_max_tokens
+        if max_tokens is None:
             max_tokens = DEFAULT_MAX_TOKENS
         # Drop OpenAI-only params that won't apply.
         for stale in (
@@ -292,6 +301,12 @@ class AnthropicChatModel(ModelAPIProtocol):
                         "https://console.anthropic.com/settings/billing "
                         "and re-run once credit is available — cached "
                         "partial transcripts will be reused."
+                    ) from e
+                if isinstance(e, BadRequestError):
+                    raise RuntimeError(
+                        "Anthropic rejected the request as invalid. This is "
+                        "usually a configuration issue, not a transient API "
+                        "failure, so the call was not retried."
                     ) from e
                 error_info = (
                     f"Exception Type: {type(e).__name__}, "

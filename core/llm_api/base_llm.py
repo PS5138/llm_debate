@@ -42,7 +42,7 @@ class StopReason(Enum):
         """
         if stop_reason in ["max_tokens", "length"]:
             return cls.MAX_TOKENS
-        elif stop_reason in ["stop_sequence", "stop"]:
+        elif stop_reason in ["stop_sequence", "stop", "end_turn"]:
             return cls.STOP_SEQUENCE
         raise ValueError(f"Invalid stop reason: {stop_reason}")
 

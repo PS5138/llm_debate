@@ -5,16 +5,20 @@
 #   ./scripts/run_medical_debate.sh [N] [EXP_DIR] [FAMILY] [BASELINES_DIR]
 #
 # Examples:
-#   ./scripts/run_medical_debate.sh 1 exp/medical_debate_smoke openai
-#   ./scripts/run_medical_debate.sh 20 exp/medical_debate_n20 openai
-#   ./scripts/run_medical_debate.sh 100 exp/medical_debate_n100 openai exp/medical_debate_n100/baselines/openai
+#   ./scripts/run_medical_debate.sh 1
+#   RUN_ROOT="$(./scripts/create_results_dir.sh)"
+#   ./scripts/run_medical_debate.sh 100 "$RUN_ROOT" openai "$RUN_ROOT/baselines/openai"
 
 set -euo pipefail
 
 LIMIT="${1:-100}"
-EXP_DIR="${2:-exp/medical_debate_n${LIMIT}}"
-FAMILY="${3:-openai}"
-BASELINES_DIR="${4:-${BASELINES_DIR:-${EXP_DIR}/baselines}}"
+FAMILY="${3:-${FAMILY:-openai}}"
+if [[ $# -ge 2 && -n "${2:-}" ]]; then
+  EXP_DIR="$2"
+else
+  EXP_DIR="${RUN_ROOT:-$(./scripts/create_results_dir.sh)}"
+fi
+BASELINES_DIR="${4:-${BASELINES_DIR:-${EXP_DIR}/baselines/${FAMILY}}}"
 THREADS="${THREADS:-5}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/medical-debate-matplotlib}"
@@ -36,6 +40,18 @@ else
 fi
 
 EXP="${EXP_DIR}/${FAMILY}"
+CONCESSION_MODEL="${CONCESSION_MODEL:-gpt-4o-mini}"
+
+"$PYTHON" scripts/write_run_metadata.py \
+  --run-root "${EXP_DIR}" \
+  --family "${FAMILY}" \
+  --n-cases "${LIMIT}" \
+  --frontier "${FRONTIER}" \
+  --weaker "${WEAKER}" \
+  --concession-model "${CONCESSION_MODEL}" \
+  --family-dir "${EXP}" \
+  --baselines-dir "${BASELINES_DIR}" \
+  --entrypoint "scripts/run_medical_debate.sh"
 
 DEBATE_OVERRIDES=(
   "++limit=${LIMIT}"
@@ -77,7 +93,6 @@ for item in "${CONDITIONS[@]}"; do
   "$PYTHON" -m core.scoring.accuracy "${COMMON_ARGS[@]}"
 done
 
-CONCESSION_MODEL="${CONCESSION_MODEL:-gpt-4o-mini}"
 echo ">>> Running concession judge (${CONCESSION_MODEL}; Y/N only — keep on a cheap model)"
 "$PYTHON" -m core.judge \
   "exp_dir=${EXP}" \
@@ -92,8 +107,22 @@ echo ">>> Running bias-control analyses (verbosity / quote-rate / concession)"
 "$PYTHON" scripts/analyze_medical_debate.py "${EXP}"
 
 echo ">>> Aggregating accuracy + PGR + per-case lift (no API spend)"
-"$PYTHON" scripts/aggregate_medical_results.py "${EXP}" \
-  --baselines-dir "${BASELINES_DIR}" \
+AGGREGATE_FAMILY_DIRS=()
+for family_dir in "${EXP_DIR}/openai" "${EXP_DIR}/anthropic"; do
+  if [[ -d "${family_dir}/debate_sim" ]]; then
+    AGGREGATE_FAMILY_DIRS+=("${family_dir}")
+  fi
+done
+if [[ ${#AGGREGATE_FAMILY_DIRS[@]} -eq 0 ]]; then
+  AGGREGATE_FAMILY_DIRS=("${EXP}")
+fi
+if [[ "$(basename "${BASELINES_DIR}")" == "${FAMILY}" ]]; then
+  AGGREGATE_BASELINES_DIR="$(dirname "${BASELINES_DIR}")"
+else
+  AGGREGATE_BASELINES_DIR="${BASELINES_DIR}"
+fi
+"$PYTHON" scripts/aggregate_medical_results.py "${AGGREGATE_FAMILY_DIRS[@]}" \
+  --baselines-dir "${AGGREGATE_BASELINES_DIR}" \
   --out-dir "${EXP_DIR}/medical_results"
 
 echo ">>> Summarising API spend from logs"
@@ -104,5 +133,5 @@ echo ">>> Summarising API spend from logs"
 echo ">>> Wrote consolidated output to ${EXP}/one_debate_outputs.md"
 echo ">>> Wrote analyses to ${EXP}/analysis/"
 echo ">>> Wrote aggregated results to ${EXP_DIR}/medical_results/"
-echo ">>> Used baselines from ${BASELINES_DIR}/ if present"
+echo ">>> Used baselines from ${AGGREGATE_BASELINES_DIR}/ if present"
 echo ">>> Wrote cost summary to ${EXP}/cost_summary.csv"

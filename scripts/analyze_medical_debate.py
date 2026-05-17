@@ -16,7 +16,7 @@ small human-readable summary — useful when N is small (e.g. on a smoke
 run) and a full Pearson correlation would be noisy.
 
 Usage:
-    python scripts/analyze_medical_debate.py exp/medical_debate_smoke/openai
+    python scripts/analyze_medical_debate.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
 """
 
 from __future__ import annotations
