@@ -2,8 +2,6 @@
 
 **Can AI debate help a weaker judge choose the right medical diagnosis?**
 
-![Live debate viewer](assets/streamlit-demo.png)
-
 ## Introduction
 
 This repository is a work-in-progress research fork of
