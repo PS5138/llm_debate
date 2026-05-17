@@ -387,6 +387,18 @@ class DebateRun:
         # doesn't need a specific venv name.
         return sys.executable
 
+    def _hydra_exp_dir(self, path: Path) -> str:
+        """Return an exp_dir override value Hydra can parse.
+
+        Hydra's override grammar treats spaces and parentheses in absolute
+        paths as syntax. The app always writes under the repo's exp/
+        directory, so pass a repo-relative path to subprocesses.
+        """
+        try:
+            return path.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            return path.as_posix()
+
     def _run(self) -> None:
         try:
             py = self._python()
@@ -408,7 +420,7 @@ class DebateRun:
                         py,
                         "-m",
                         stage,
-                        f"exp_dir={self.baselines_dir}",
+                        f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
                         f"+experiment={arm}",
                         limit_arg,
                         threads_arg,
@@ -429,7 +441,7 @@ class DebateRun:
                 py,
                 "-m",
                 "core.debate",
-                f"exp_dir={self.family_dir}",
+                f"exp_dir={self._hydra_exp_dir(self.family_dir)}",
                 "+experiment=medical_debate",
                 limit_arg,
                 threads_arg,
@@ -461,7 +473,7 @@ class DebateRun:
                     return
                 judge_name = f"{cond}_{judge_model}"
                 common = [
-                    f"exp_dir={self.family_dir}",
+                    f"exp_dir={self._hydra_exp_dir(self.family_dir)}",
                     f"+experiment={experiment}",
                     limit_arg,
                     threads_arg,
@@ -486,7 +498,7 @@ class DebateRun:
                 py,
                 "-m",
                 "core.judge",
-                f"exp_dir={self.family_dir}",
+                f"exp_dir={self._hydra_exp_dir(self.family_dir)}",
                 "+experiment=medical_debate",
                 limit_arg,
                 threads_arg,
