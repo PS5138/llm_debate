@@ -2,6 +2,8 @@
 
 **Can AI debate help a weaker judge choose the right medical diagnosis?**
 
+## Introduction
+
 This repository is a work-in-progress research fork of
 [`ucl-dark/llm_debate`](https://github.com/ucl-dark/llm_debate), the codebase
 released with Khan et al. (2024), *Debating with More Persuasive LLMs Leads to
