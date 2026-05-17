@@ -17,6 +17,16 @@ plausible distractor from that case's differential diagnosis list. Two debaters
 argue opposite sides while seeing the structured patient evidence. A judge then
 chooses between the diagnoses, sometimes without seeing the evidence directly.
 
+The motivation is future-facing. A clinician reviewing an AI-assisted diagnosis
+may be surrounded by more information than they can realistically verify: a long
+record, a differential diagnosis, prior history, medications, test results, and
+model-generated reasoning arriving under time pressure. In that world, the
+supervisor may not be weak in an absolute sense; they may simply be weaker than
+the system on that task, or too overloaded to audit every detail from scratch.
+This project uses a weaker model judge as a proxy for that future human
+supervisor: capable enough to evaluate arguments, but not assumed to have the
+time, context, or raw capability to reconstruct the answer alone.
+
 This is not a medical product and it is not a diagnostic system. It is an AI
 safety experiment about oversight: can argument and counterargument help a less
 capable supervisor identify the answer that is better supported by evidence it
@@ -118,6 +128,11 @@ The planned model families are:
 E1 and E4 use the frontier model as final judge. E2 and E3 use the weaker model
 as final judge. The OpenAI weaker judge is `gpt-5.4-mini`; the Anthropic weaker
 judge is `claude-sonnet-4-6`.
+
+The concession quality-control judge currently uses `gpt-4o-mini` for both
+families. It is a cheap Y/N check for whether a debater conceded or argued for
+the opposing side; it does not decide the diagnosis or count as an E1-E4 answer
+judge.
 
 ### Pipeline
 
@@ -228,7 +243,9 @@ The experiment uses several judge roles:
   conceding or arguing for the opposing side.
 
 The concession judge is a quality-control judge, not a diagnosis judge. It does
-not decide who won the debate.
+not decide who won the debate. In the current scripts and frontend it uses
+`gpt-4o-mini` regardless of whether the main model family is OpenAI or
+Anthropic.
 
 ### Quote Verification
 
@@ -325,9 +342,6 @@ should be inferred from the repository yet.
 - Inspect debate transcripts and concession flags before reporting headline
   accuracy.
 - Populate final result tables and plots from cached outputs.
-- Add a brief local Streamlit viewer for education and demo purposes. The first
-  version should read existing `exp/` outputs rather than launch expensive API
-  jobs.
 - Consider a paired bootstrap or McNemar-style analysis for per-case lift once
   the full runs are complete.
 - Migrate the OpenAI adapter from the legacy `openai==0.28.0` SDK to the modern
@@ -360,10 +374,11 @@ ANTHROPIC_API_KEY=<anthropic-key>
 DEFAULT_ORG=
 ```
 
-`DEFAULT_ORG` can be left blank if you do not need to set an OpenAI
-organization. Keep an `ANTHROPIC_API_KEY=` line even for OpenAI-only runs,
-because the shared secrets loader expects the key to exist. Anthropic runs need
-a real Anthropic key. Keep `SECRETS` local; it is ignored by Git.
+Keep the `DEFAULT_ORG=` line, but leave it blank unless your OpenAI account
+requires an organization ID. Keep an `ANTHROPIC_API_KEY=` line even for
+OpenAI-only runs, because the shared secrets loader expects the key to exist.
+Anthropic runs need a real Anthropic key. Keep `SECRETS` local; it is ignored by
+Git.
 
 ### Install
 
@@ -385,6 +400,65 @@ Local no-API parser test:
 ```bash
 make test
 ```
+
+There are three ways to use this repo:
+
+- **Interactive frontend:** launch a local browser UI for learning, smoke tests,
+  and watching debates fill in live.
+- **One-command wrapper:** run the full baseline → debate → judging → analysis
+  pipeline with one script.
+- **Manual scripts:** run individual stages yourself if you want tighter control
+  over baselines, debate generation, analysis, or reruns.
+
+### Interactive Frontend
+
+There is a small local frontend for exploring the pipeline live. It is meant for
+**education and exploration**, not for batch experiments. Anything you run is
+isolated to a temporary run directory.
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+What it does:
+
+- Pick a model family (`openai` or `anthropic`) and a number of cases
+  between **1 and 100** from the committed DDXPlus pilot.
+- Paste your own API key(s) — they live only in the Streamlit session and
+  are written to a session-scoped tempfile, never to your repo `SECRETS`.
+- Hit **Run**. The app shells out to the same pipeline stages the CLI uses
+  (baselines → debate → E1-E4 final judging → concession judge → analysis →
+  aggregation) under a fresh tempdir.
+- The case table fills in row by row as debates complete. Pick any case to
+  read the full transcript (Round 1, 2, 3 with both debaters labelled) and
+  see which side each E1-E4 judge picked under the original and swapped A/B
+  orderings.
+- When the run finishes, the bottom of the page shows the aggregate
+  accuracy/PGR tables and the generated plots from `medical_results/`.
+- **Clear run** deletes the tempdir, the session SECRETS, and any partial
+  outputs. Use Clear run for immediate cleanup; closing a browser tab does not
+  always give Streamlit a chance to clean up instantly.
+- **Stop** cancels the current run. Starting again creates a fresh tempdir and
+  begins from baselines; the demo does not resume partial runs.
+
+Things to know before clicking **Run**:
+
+- **You pay for your run.** The sidebar shows a rough cost estimate based on
+  family and case count; treat it as a ballpark, not an invoice. Start with
+  1–3 cases.
+- **The OpenAI key is always required** because the concession (quality
+  control) judge uses `gpt-4o-mini` regardless of family. The Anthropic key
+  is only needed if you pick the `anthropic` family.
+- Nothing is written to tracked repo output paths. There is no database, no
+  upload, and no shared state between sessions — every run is isolated to a
+  local tempdir and the user's own key.
+- The app uses the same `data/ddxplus/ddxplus_debate_pilot_100.csv` that is
+  committed to this repo. It does not accept arbitrary CSV uploads.
+
+The full experiment outputs are not committed yet. Once the full runs are
+complete, the intended published results will live under `exp/` or an equivalent
+release artifact; until then, the app is for people who want to drive a fresh
+run themselves.
 
 ### One-Command Run
 
@@ -414,7 +488,7 @@ The wrapper script:
 3. Runs blind and oracle baselines.
 4. Runs debate transcript generation.
 5. Runs E1-E4 final judging.
-6. Runs concession judging.
+6. Runs concession judging with `gpt-4o-mini` by default.
 7. Runs bias-control analysis, aggregation, cost summary, and transcript export.
 
 Useful overrides:
@@ -478,6 +552,8 @@ python scripts/export_medical_debate_output.py \
 
 | File | Purpose |
 |---|---|
+| `app/streamlit_app.py` | Local frontend: live row-by-row debate viewer and aggregate dashboard. |
+| `app/runner.py` | Ephemeral pipeline runner used by the local frontend. |
 | `scripts/run_medical_full.sh` | One-command wrapper for baselines, debate, judging, analysis, and export. |
 | `scripts/prepare_ddxplus_debate_pilot.py` | Rebuilds the deterministic 100-case DDXPlus pilot. |
 | `scripts/run_medical_baselines.sh` | Runs blind and oracle baselines for one model family. |

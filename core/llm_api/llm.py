@@ -18,7 +18,7 @@ from core.llm_api.openai_llm import (
     OpenAIBaseModel,
     OpenAIChatModel,
 )
-from core.utils import load_secrets
+from core.utils import load_secrets, prompt_history_dir
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,24 +41,25 @@ class ModelAPI:
     model_wait_times: dict[str, list[float]] = attrs.field(init=False, default={})
 
     def __attrs_post_init__(self):
-        secrets = load_secrets("SECRETS")
+        secrets = load_secrets(os.environ.get("MEDICAL_DEBATE_SECRETS_PATH", "SECRETS"))
         if self.organization is None:
             self.organization = "DEFAULT_ORG"
+        organization = secrets.get(self.organization, "") or None
         self._openai_base = OpenAIBaseModel(
             frac_rate_limit=self.openai_fraction_rate_limit,
-            organization=secrets[self.organization],
+            organization=organization,
             print_prompt_and_response=self.print_prompt_and_response,
         )
         self._openai_chat = OpenAIChatModel(
             frac_rate_limit=self.openai_fraction_rate_limit,
-            organization=secrets[self.organization],
+            organization=organization,
             print_prompt_and_response=self.print_prompt_and_response,
         )
         self._anthropic_chat = AnthropicChatModel(
             num_threads=self.anthropic_num_threads,
             print_prompt_and_response=self.print_prompt_and_response,
         )
-        Path("./prompt_history").mkdir(exist_ok=True)
+        Path(prompt_history_dir()).mkdir(parents=True, exist_ok=True)
 
     async def call_single(
         self,

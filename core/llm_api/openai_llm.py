@@ -22,6 +22,7 @@ from core.llm_api.base_llm import (
     ModelAPIProtocol,
     messages_to_single_prompt,
 )
+from core.utils import prompt_history_dir
 
 OAIChatPrompt = list[dict[str, str]]
 OAIBasePrompt = Union[str, list[str]]
@@ -128,7 +129,7 @@ class Resource:
 @attrs.define
 class OpenAIModel(ModelAPIProtocol):
     frac_rate_limit: float
-    organization: str
+    organization: Optional[str]
     print_prompt_and_response: bool = False
     model_ids: set[str] = attrs.field(init=False, default=attrs.Factory(set))
 
@@ -168,7 +169,9 @@ class OpenAIModel(ModelAPIProtocol):
     @staticmethod
     def _create_prompt_history_file(prompt):
         filename = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}_prompt.txt"
-        with open(os.path.join("prompt_history", filename), "w") as f:
+        path = prompt_history_dir()
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, filename), "w") as f:
             json_str = json.dumps(prompt, indent=4)
             json_str = json_str.replace("\\n", "\n")
             f.write(json_str)
@@ -177,13 +180,19 @@ class OpenAIModel(ModelAPIProtocol):
 
     @staticmethod
     def _add_response_to_prompt_file(prompt_file, responses):
-        with open(os.path.join("prompt_history", prompt_file), "a") as f:
+        with open(os.path.join(prompt_history_dir(), prompt_file), "a") as f:
             f.write("\n\n======RESPONSE======\n\n")
             json_str = json.dumps(
                 [response.to_dict() for response in responses], indent=4
             )
             json_str = json_str.replace("\\n", "\n")
             f.write(json_str)
+
+    def _organization_header(self) -> dict[str, str]:
+        return {"OpenAI-Organization": self.organization} if self.organization else {}
+
+    def _organization_param(self) -> dict[str, str]:
+        return {"organization": self.organization} if self.organization else {}
 
     async def add_model_id(self, model_id: str):
         self._assert_valid_id(model_id)
@@ -356,7 +365,7 @@ class OpenAIChatModel(OpenAIModel):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {openai.api_key}",
-            "OpenAI-Organization": self.organization,
+            **self._organization_header(),
         }
         data = {
             "model": model_id,
@@ -421,7 +430,7 @@ class OpenAIChatModel(OpenAIModel):
                 params["max_completion_tokens"] = 64
 
         api_start = time.time()
-        api_response: OpenAICompletion = await openai.ChatCompletion.acreate(messages=prompt, model=model_id, organization=self.organization, **params)  # type: ignore
+        api_response: OpenAICompletion = await openai.ChatCompletion.acreate(messages=prompt, model=model_id, **self._organization_param(), **params)  # type: ignore
         api_duration = time.time() - api_start
         duration = time.time() - start_time
         context_token_cost, completion_token_cost = price_per_token(model_id)
@@ -484,7 +493,7 @@ class OpenAIBaseModel(OpenAIModel):
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {openai.api_key}",
-            "OpenAI-Organization": self.organization,
+            **self._organization_header(),
         }
         data = {"model": model_id, "prompt": "a", "max_tokens": 1}
         response = requests.post(url, headers=headers, json=data)
@@ -511,7 +520,7 @@ class OpenAIBaseModel(OpenAIModel):
     ) -> list[LLMResponse]:
         LOGGER.debug(f"Making {model_id} call with {self.organization}")
         api_start = time.time()
-        api_response: OpenAICompletion = await openai.Completion.acreate(prompt=prompt, model=model_id, organization=self.organization, **params)  # type: ignore
+        api_response: OpenAICompletion = await openai.Completion.acreate(prompt=prompt, model=model_id, **self._organization_param(), **params)  # type: ignore
         api_duration = time.time() - api_start
         duration = time.time() - start_time
         context_token_cost, completion_token_cost = price_per_token(model_id)

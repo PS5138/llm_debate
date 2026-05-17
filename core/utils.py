@@ -40,11 +40,16 @@ def setup_environment(
     organization: str = None,
 ):
     setup_logging(logger_level)
-    secrets = load_secrets("SECRETS")
+    secrets_path = os.environ.get("MEDICAL_DEBATE_SECRETS_PATH", "SECRETS")
+    secrets = load_secrets(secrets_path)
     openai.api_key = secrets[openai_tag]
     os.environ["ANTHROPIC_API_KEY"] = secrets[anthropic_tag]
     if organization is not None:
         openai.organization = secrets[organization]
+
+
+def prompt_history_dir() -> str:
+    return os.environ.get("MEDICAL_DEBATE_PROMPT_HISTORY_DIR", PROMPT_HISTORY)
 
 
 def setup_logging(level_str):
@@ -105,13 +110,15 @@ def save_jsonl(file_path, data):
 
 
 def delete_old_prompt_files(
-    path: str = PROMPT_HISTORY, max_age_minutes: int = 60, keep_recent: int = 50
+    path: str | None = None, max_age_minutes: int = 60, keep_recent: int = 50
 ):
     """
     Delete all files in the folder that:
     - Are more than max_age_minutes old
     - AND are not one of the keep_recent most recent files
     """
+    if path is None:
+        path = prompt_history_dir()
     if not os.path.exists(path):
         return
 

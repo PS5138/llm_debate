@@ -31,6 +31,7 @@ from core.llm_api.base_llm import (
     ModelAPIProtocol,
 )
 from core.llm_api.openai_llm import OAIChatPrompt
+from core.utils import prompt_history_dir
 
 # Known Anthropic IDs. The Messages API also accepts other valid IDs at
 # runtime; this set is just for routing in core/llm_api/llm.py.
@@ -168,8 +169,9 @@ class AnthropicChatModel(ModelAPIProtocol):
     @staticmethod
     def _create_prompt_history_file(payload):
         filename = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}_prompt.txt"
-        os.makedirs("prompt_history", exist_ok=True)
-        with open(os.path.join("prompt_history", filename), "w") as f:
+        path = prompt_history_dir()
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, filename), "w") as f:
             try:
                 json_str = json.dumps(payload, indent=4, default=str)
             except Exception:
@@ -181,7 +183,7 @@ class AnthropicChatModel(ModelAPIProtocol):
     @staticmethod
     def _add_response_to_prompt_file(prompt_file, responses):
         try:
-            with open(os.path.join("prompt_history", prompt_file), "a") as f:
+            with open(os.path.join(prompt_history_dir(), prompt_file), "a") as f:
                 f.write("\n\n======RESPONSE======\n\n")
                 payload = [
                     r.to_dict() if hasattr(r, "to_dict") else r.__dict__

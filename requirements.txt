@@ -17,6 +17,7 @@ scikit-learn
 scipy
 seaborn
 sqlalchemy==2.0.18
+streamlit==1.56.0
 tabulate
 tenacity
 termcolor
