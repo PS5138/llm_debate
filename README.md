@@ -2,7 +2,7 @@
 
 **Can AI debate help a weaker judge choose the right medical diagnosis?**
 
-![Live debate viewer](assets/streamlit-demo_final.png)
+![Live debate viewer](assets/streamlit-demo-final.png)
 
 ## Introduction
 
