@@ -38,11 +38,16 @@ from core.utils import prompt_history_dir
 ANTHROPIC_MODELS = {
     # Claude 4.x family — the medical sprint targets these.
     "claude-opus-4-7",
+    "claude-opus-4-6",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",
     # Recent dated aliases that may be used.
     "claude-opus-4-7-20251201",
     "claude-sonnet-4-6-20251101",
+    # Earlier 4.x snapshots still on the API (per Anthropic's models overview).
+    "claude-sonnet-4-5-20250929",
+    "claude-opus-4-5-20251101",
+    "claude-opus-4-1-20250805",
     # Legacy IDs kept so QuALITY-era reproduce scripts still route.
     "claude-3-5-sonnet-20241022",
     "claude-3-5-sonnet-20240620",

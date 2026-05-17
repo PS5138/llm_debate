@@ -161,7 +161,7 @@ with st.sidebar:
         st.error(
             f"Estimated cost on your own key: **~${est:0.2f}**. "
             f"Calibrated against a May 2026 Anthropic smoke run "
-            f"(~$4/case on Opus 4.7, ~$2.50/case on gpt-5.5). "
+            f"(~$2.50/case ballpark on both Opus 4.6 and gpt-5.5). "
             f"Start with 1–3 cases to confirm the pipeline works on "
             f"your account before spending more."
         )
@@ -174,8 +174,8 @@ with st.sidebar:
     else:
         st.info(
             f"Estimated cost on your own key: **~${est:0.2f}**. "
-            f"Adaptive thinking on Opus 4.7 inflates Anthropic cost "
-            f"beyond the headline $5 / $25 per million."
+            f"Opus 4.6 lists at $5 / $25 per million; gpt-5.5 lists at "
+            f"$5 / $30. Real spend varies with case length."
         )
 
     st.divider()

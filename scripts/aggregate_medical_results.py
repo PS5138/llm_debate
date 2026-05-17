@@ -25,7 +25,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -45,9 +44,31 @@ from core.scoring.accuracy import find_answer
 # Pulling per-case correctness out of the judgement CSVs
 # ---------------------------------------------------------------------------
 
-# subdirectories matching this pattern hold debate-stage judgements.
-# Concession judging lives under `concession_*` and is excluded here.
-_CONDITION_RE = re.compile(r"^(e[1-4]_[a-z_]+?)_(.+)$")
+# Debate-stage judgement subdirectories are named `<condition>_<judge_model>`,
+# e.g. `e2_double_asymmetry_claude-sonnet-4-6`. The naive regex
+# `^(e[1-4]_[a-z_]+?)_(.+)$` is too greedy/non-greedy and splits in the
+# middle of the condition name. Match against the fixed condition prefixes
+# instead so `claude-opus-4-6` and `gpt-5.4-mini` round-trip cleanly as the
+# judge model.
+_KNOWN_CONDITIONS = (
+    "e1_info_asymmetry",
+    "e2_double_asymmetry",
+    "e3_capability_asymmetry",
+    "e4_full_symmetry",
+)
+
+
+def _split_condition_dir(name: str) -> Optional[tuple[str, str]]:
+    """Return (condition, judge_model) or None if the dir name isn't an
+    E1-E4 final-judge directory.
+    """
+    for cond in _KNOWN_CONDITIONS:
+        prefix = cond + "_"
+        if name.startswith(prefix):
+            judge = name[len(prefix):]
+            if judge:
+                return cond, judge
+    return None
 
 
 def _judge_correctness(answer_text: str, swap: bool) -> Optional[bool]:
@@ -81,10 +102,10 @@ def _scan_family_dir(family_dir: Path, family_label: str) -> pd.DataFrame:
             continue
         if sub.name.startswith("concession_"):
             continue
-        m = _CONDITION_RE.match(sub.name)
-        if not m:
+        parsed = _split_condition_dir(sub.name)
+        if parsed is None:
             continue
-        condition, judge = m.group(1), m.group(2)
+        condition, judge = parsed
         for fname, swap in (
             ("data0_judgement.csv", False),
             ("data0_swap_judgement.csv", True),
@@ -431,16 +452,21 @@ def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
             ax.text(0.5, 0.5, "no baseline data", ha="center", va="center", transform=ax.transAxes)
             ax.set_xticks([]); ax.set_yticks([])
             continue
-        # 2x2 contingency on >=0.5 thresholds
+        # 2x2 contingency on >=0.5 thresholds. We build the table by direct
+        # counts instead of pd.crosstab + reindex; with n=1 a crosstab can
+        # be 1x1 and pandas refuses to set a missing bool-indexed cell.
         sub = sub.copy()
         sub["blind_correct"] = sub["blind_acc"] >= 0.5
         sub["debate_correct"] = sub["debate_acc"] >= 0.5
-        ct = pd.crosstab(sub["blind_correct"], sub["debate_correct"], dropna=False)
-        for r in [False, True]:
-            for c in [False, True]:
-                if r not in ct.index: ct.loc[r] = 0
-                if c not in ct.columns: ct[c] = 0
-        ct = ct.reindex(index=[False, True], columns=[False, True], fill_value=0)
+        counts = {(False, False): 0, (False, True): 0, (True, False): 0, (True, True): 0}
+        for _, row in sub.iterrows():
+            counts[(bool(row["blind_correct"]), bool(row["debate_correct"]))] += 1
+        ct = pd.DataFrame(
+            [[counts[(False, False)], counts[(False, True)]],
+             [counts[(True, False)],  counts[(True, True)]]],
+            index=[False, True],
+            columns=[False, True],
+        )
         im = ax.imshow(ct.values, cmap="Blues")
         for ri in range(2):
             for ci in range(2):

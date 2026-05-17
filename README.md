@@ -125,7 +125,7 @@ The planned model families are:
 | Family | Frontier debaters / frontier judge | Weaker judge and headline baselines |
 |---|---|---|
 | OpenAI | `gpt-5.5` | `gpt-5.4-mini` |
-| Anthropic | `claude-opus-4-7` | `claude-sonnet-4-6` |
+| Anthropic | `claude-opus-4-6` | `claude-sonnet-4-6` |
 
 E1 and E4 use the frontier model as final judge. E2 and E3 use the weaker model
 as final judge. The OpenAI weaker judge is `gpt-5.4-mini`; the Anthropic weaker
@@ -233,36 +233,17 @@ tie-break judging pass.
 The preference judge is only an internal argument-selection mechanism. The
 final answer judges run after the full transcript has been generated.
 
-#### Sampling Asymmetry Between Families
+#### Sampling
 
-BoN candidate diversity does not come from the same mechanism across the two
-model families, which is worth flagging as a methodological asymmetry.
-
-For the OpenAI family, both debaters are sampled at `temperature=0.8`,
+Both debaters are sampled at `temperature=0.8` across both model families,
 matching the configuration used by Khan et al. for QuALITY. The four BoN
-candidates per debater turn are therefore drawn from a relatively warm
-distribution and tend to differ meaningfully in wording and emphasis.
-
-For the Anthropic family, Claude Opus 4.7 rejects any non-default
-`temperature`, `top_p`, or `top_k` (the Anthropic Messages API returns
-HTTP 400; see Anthropic's [migration guide][opus-4-7-migration]). Opus 4.7
-controls sampling internally via adaptive thinking, and the documented
-guidance is to omit the sampling parameters entirely and rely on prompting
-for behavioural variation. The repo's Anthropic adapter therefore drops
-`temperature` (and `top_p`, `top_k`) before each Opus 4.7 call. BoN
-candidates from Opus 4.7 are still four independent samples, but their
-diversity reflects whatever stochasticity the model exposes by default,
-not an experimenter-chosen temperature.
-
-This does not change the BoN selection mechanism — the preference judge
-still rates four candidates and writes the top one into the transcript —
-but it does mean head-to-head comparisons across families should not be
-read as a clean controlled comparison of the underlying models. Any
-observed gap between OpenAI and Anthropic accuracy or PGR could reflect
-this sampling-control difference in addition to model capability.
-
-Earlier Anthropic models (Sonnet 4.6, Opus 4.6, Haiku 4.5) still accept
-`temperature` and are unaffected by the strip.
+candidates per debater turn are drawn from a relatively warm distribution
+and tend to differ meaningfully in wording and emphasis. The Anthropic
+adapter has a guard that strips `temperature`, `top_p`, and `top_k` for
+Opus 4.7 (which rejects non-default sampling params per Anthropic's
+[migration guide][opus-4-7-migration]), so if anyone swaps the frontier
+model to 4.7 the request will still be accepted — at the cost of losing
+the experimenter-chosen temperature on that family.
 
 [opus-4-7-migration]: https://platform.claude.com/docs/en/about-claude/models/migration-guide
 
@@ -403,20 +384,6 @@ Provider-specific differences:
 Pending. This section should be filled only after the full planned runs have
 completed and the cached outputs have been inspected. No empirical conclusion
 should be inferred from the repository yet.
-
-## Pending
-
-- Run the full 100-case OpenAI family experiment.
-- Run the full 100-case Anthropic family experiment.
-- Inspect debate transcripts and concession flags before reporting headline
-  accuracy.
-- Populate final result tables and plots from cached outputs.
-- Consider a paired bootstrap or McNemar-style analysis for per-case lift once
-  the full runs are complete.
-- Migrate the OpenAI adapter from the legacy `openai==0.28.0` SDK to the modern
-  OpenAI Python client.
-- Re-check model identifiers, pricing, and API behavior before any public
-  final write-up.
 
 ## How To Run
 

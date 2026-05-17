@@ -29,7 +29,7 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 if [[ "$FAMILY" == "anthropic" ]]; then
-  FRONTIER="${FRONTIER:-claude-opus-4-7}"
+  FRONTIER="${FRONTIER:-claude-opus-4-6}"
   WEAKER="${WEAKER:-claude-sonnet-4-6}"
 elif [[ "$FAMILY" == "openai" ]]; then
   FRONTIER="${FRONTIER:-gpt-5.5}"

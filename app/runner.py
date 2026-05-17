@@ -34,11 +34,11 @@ PILOT_CSV = REPO_ROOT / "data" / "ddxplus" / "ddxplus_debate_pilot_100.csv"
 
 FAMILY_MODELS = {
     "openai": {"frontier": "gpt-5.5", "weaker": "gpt-5.4-mini"},
-    "anthropic": {"frontier": "claude-opus-4-7", "weaker": "claude-sonnet-4-6"},
+    "anthropic": {"frontier": "claude-opus-4-6", "weaker": "claude-sonnet-4-6"},
 }
 
 # Per-family concurrency caps, expressed as "how many cases can run in
-# parallel at a time". Anthropic stays conservative because Opus 4.7 has
+# parallel at a time". Anthropic stays conservative because Opus has
 # long per-call latency and lower-tier accounts have tight RPM limits;
 # OpenAI can safely go wider since gpt-5.5 has no adaptive-thinking
 # overhead and per-account RPM is more generous.
@@ -55,22 +55,18 @@ CASES_AT_A_TIME = {
 }
 BON = 4
 
-# Per-case cost estimates in USD. Calibrated against an observed Anthropic
-# smoke run (May 2026: ~$6 for ~1.5 cases ≈ $4/case end-to-end). These
-# include BoN=4 × 3 rounds × 2 debaters of debate generation, 4 final-judge
-# arms × 2 swap orderings on cached transcripts, and concession judging.
+# Per-case cost estimates in USD. The OpenAI number is calibrated against
+# the published gpt-5.5 pricing × the BoN=4 × 3-round × 2-debater debate
+# stage + 4 final-judge arms × 2 swap orderings + concession judging.
 #
-# The dominant cost on Anthropic is Opus 4.7's adaptive-thinking overhead:
-# each visible debater turn burns several thousand hidden reasoning tokens
-# that count against output billing. OpenAI's gpt-5.5 doesn't have an
-# equivalent hidden-thinking overhead, so its per-case cost is lower
-# despite similar list pricing.
-#
-# Treat these as ballparks. Actual spend will vary with case length,
-# evidence size, and how chatty the models feel.
+# The Anthropic number is for Opus 4.6, which has the same $5/$25 list
+# price as 4.7 but no adaptive-thinking overhead. A 4.7 smoke came in at
+# ~$4/case end-to-end; 4.6 should land lower because output tokens aren't
+# inflated by hidden reasoning, but the exact number won't be known until
+# a 4.6 smoke completes. Treat this as a ballpark only.
 COST_PER_CASE_USD = {
     "openai": 2.50,
-    "anthropic": 4.00,
+    "anthropic": 2.50,
 }
 
 CONDITIONS = ["e1_info_asymmetry", "e2_double_asymmetry", "e3_capability_asymmetry", "e4_full_symmetry"]
@@ -303,8 +299,8 @@ class DebateRun:
 
     def stop(self) -> None:
         """Signal stop and escalate from SIGTERM → SIGKILL if the subprocess
-        doesn't exit promptly. Adaptive-thinking calls on Opus 4.7 can take
-        60-90s each and don't always respond to SIGTERM mid-call, so we
+        doesn't exit promptly. Long frontier-model API calls can take tens
+        of seconds and don't always respond to SIGTERM mid-call, so we
         give a short grace period and then hard-kill.
         """
         with self._lock:
