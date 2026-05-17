@@ -330,6 +330,8 @@ should be inferred from the repository yet.
   jobs.
 - Consider a paired bootstrap or McNemar-style analysis for per-case lift once
   the full runs are complete.
+- Migrate the OpenAI adapter from the legacy `openai==0.28.0` SDK to the modern
+  OpenAI Python client.
 - Re-check model identifiers, pricing, and API behavior before any public
   final write-up.
 
@@ -343,6 +345,9 @@ You need:
 - A Unix-like shell environment.
 - OpenAI API access.
 - Anthropic API access if running the Anthropic family.
+- The pinned OpenAI Python SDK in `requirements.txt`. The current OpenAI
+  adapter still uses the legacy `openai.ChatCompletion.acreate` API, so do not
+  upgrade to `openai>=1.x` until `core/llm_api/openai_llm.py` has been migrated.
 - The committed DDXPlus pilot CSV, or local raw DDXPlus release files if you
   want to rebuild it.
 
