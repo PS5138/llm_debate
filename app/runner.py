@@ -37,12 +37,40 @@ FAMILY_MODELS = {
     "anthropic": {"frontier": "claude-opus-4-7", "weaker": "claude-sonnet-4-6"},
 }
 
-# Conservative per-case cost estimates in USD, derived from frontier + weaker
-# pricing × BoN=4 × 3 rounds × 2 debaters × judge passes across E1-E4 + concession.
-# Numbers are rounded-up ballparks meant to set expectations, not invoicing.
+# Per-family concurrency caps, expressed as "how many cases can run in
+# parallel at a time". Anthropic stays conservative because Opus 4.7 has
+# long per-call latency and lower-tier accounts have tight RPM limits;
+# OpenAI can safely go wider since gpt-5.5 has no adaptive-thinking
+# overhead and per-account RPM is more generous.
+#
+# The pipeline scales these into the underlying `anthropic_num_threads`
+# Hydra setting differently for debate vs judge:
+#   * debate-stage threads = CASES_AT_A_TIME × BoN  (because core.debate
+#     divides by BoN internally to derive case concurrency)
+#   * judge/score-stage threads = CASES_AT_A_TIME   (no BoN fan-out at
+#     judge time, so it maps 1:1 to concurrent cases)
+CASES_AT_A_TIME = {
+    "openai": 5,
+    "anthropic": 2,
+}
+BON = 4
+
+# Per-case cost estimates in USD. Calibrated against an observed Anthropic
+# smoke run (May 2026: ~$6 for ~1.5 cases ≈ $4/case end-to-end). These
+# include BoN=4 × 3 rounds × 2 debaters of debate generation, 4 final-judge
+# arms × 2 swap orderings on cached transcripts, and concession judging.
+#
+# The dominant cost on Anthropic is Opus 4.7's adaptive-thinking overhead:
+# each visible debater turn burns several thousand hidden reasoning tokens
+# that count against output billing. OpenAI's gpt-5.5 doesn't have an
+# equivalent hidden-thinking overhead, so its per-case cost is lower
+# despite similar list pricing.
+#
+# Treat these as ballparks. Actual spend will vary with case length,
+# evidence size, and how chatty the models feel.
 COST_PER_CASE_USD = {
-    "openai": 0.35,
-    "anthropic": 0.45,
+    "openai": 2.50,
+    "anthropic": 4.00,
 }
 
 CONDITIONS = ["e1_info_asymmetry", "e2_double_asymmetry", "e3_capability_asymmetry", "e4_full_symmetry"]
@@ -59,6 +87,45 @@ def create_results_root(base_dir: Path = REPO_ROOT / "exp") -> Path:
         suffix += 1
     candidate.mkdir(parents=True)
     return candidate
+
+
+def find_latest_run(base_dir: Path = REPO_ROOT / "exp") -> Optional[dict]:
+    """Scan exp/ for the most recent `<timestamp>_results/` directory and
+    return its metadata (family, n_cases, frontier/weaker models, path).
+
+    Returns None if no resumable run is found. The dir is considered
+    resumable if it has a `run_metadata.json` at the root level so we
+    can recover family + n_cases without asking the user.
+    """
+    if not base_dir.exists():
+        return None
+    candidates = sorted(
+        (p for p in base_dir.iterdir() if p.is_dir() and p.name.endswith("_results")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for cand in candidates:
+        meta_path = cand / "run_metadata.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        families = meta.get("families") or {}
+        if not families:
+            continue
+        # Take the first (usually only) family recorded.
+        family_name, family_record = next(iter(families.items()))
+        return {
+            "exp_dir": cand,
+            "family": family_name,
+            "n_cases": int(family_record.get("n_cases", 0)),
+            "frontier_model": family_record.get("frontier_model"),
+            "weaker_model": family_record.get("weaker_model"),
+            "recorded_at_utc": family_record.get("recorded_at_utc"),
+        }
+    return None
 
 
 class Phase(str, Enum):
@@ -107,6 +174,7 @@ class DebateRun:
         openai_key: str,
         anthropic_key: str,
         concession_model: str = "gpt-4o-mini",
+        resume_from: Optional[Path] = None,
     ) -> None:
         if family not in FAMILY_MODELS:
             raise ValueError(f"unknown family: {family!r}")
@@ -121,6 +189,7 @@ class DebateRun:
         self.family = family
         self.n_cases = int(n_cases)
         self.concession_model = concession_model
+        self.is_resume = resume_from is not None
 
         self._tempdir = Path(tempfile.mkdtemp(prefix="medical_debate_app_"))
         self._secrets_path = self._tempdir / "SECRETS"
@@ -141,13 +210,25 @@ class DebateRun:
         except OSError:
             pass
 
-        self.exp_root = create_results_root()
+        # Resume mode: reuse the existing exp dir so the underlying
+        # pipeline picks up where it left off (rows with complete=True
+        # are skipped by core.debate; judgements with complete_judge=True
+        # are skipped by core.judge). Fresh mode: create a new timestamped
+        # results root under exp/.
+        if resume_from is not None:
+            resolved = resume_from.resolve()
+            if not resolved.exists():
+                raise ValueError(f"resume directory does not exist: {resolved}")
+            self.exp_root = resolved
+        else:
+            self.exp_root = create_results_root()
         self.exp_dir = self.exp_root
         self.baselines_dir = self.exp_dir / "baselines" / family
         self.family_dir = self.exp_dir / family
         self.results_dir = self.exp_dir / "medical_results"
         self.log_path = self._tempdir / "pipeline.log"
-        self._write_run_metadata("app/streamlit_app.py")
+        if not self.is_resume:
+            self._write_run_metadata("app/streamlit_app.py")
 
         self._lock = threading.Lock()
         self._phase = Phase.PENDING
@@ -221,17 +302,44 @@ class DebateRun:
             self._thread.start()
 
     def stop(self) -> None:
+        """Signal stop and escalate from SIGTERM → SIGKILL if the subprocess
+        doesn't exit promptly. Adaptive-thinking calls on Opus 4.7 can take
+        60-90s each and don't always respond to SIGTERM mid-call, so we
+        give a short grace period and then hard-kill.
+        """
         with self._lock:
             self._stop_requested = True
             proc = self._proc
-        if proc is not None and proc.poll() is None:
+
+        if proc is None or proc.poll() is not None:
+            return
+
+        def _signal(sig: int) -> None:
             try:
                 if os.name == "posix":
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(proc.pid), sig)
                 else:
                     proc.terminate()
             except (ProcessLookupError, PermissionError, OSError):
                 pass
+
+        # First: ask nicely.
+        _signal(signal.SIGTERM)
+        self._append_log("[stop] SIGTERM sent; waiting up to 5s for graceful exit")
+
+        # Then escalate in a background thread so stop() returns fast.
+        def _escalate() -> None:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._append_log("[stop] SIGTERM ignored; sending SIGKILL")
+                _signal(signal.SIGKILL if os.name == "posix" else signal.SIGTERM)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self._append_log("[stop] SIGKILL ignored; subprocess may be stuck in C code")
+
+        threading.Thread(target=_escalate, daemon=True).start()
 
     def cleanup(self) -> None:
         self.stop()
@@ -337,6 +445,20 @@ class DebateRun:
         with self._lock:
             return self._stop_requested
 
+    def _stage_outcome(self, label: str, rc: int) -> Optional[str]:
+        """Inspect a stage's return code and the stop flag.
+
+        Returns:
+            None if the stage succeeded and the run should continue.
+            "stopped" if the user asked to stop (regardless of rc).
+            "error: ..." if the stage failed for any other reason.
+        """
+        if self._stop_check():
+            return "stopped"
+        if rc != 0:
+            return f"error: {label} exited with code {rc}"
+        return None
+
     def _run_stage(self, label: str, cmd: list[str]) -> int:
         """Spawn one subprocess, stream its output to the in-memory tail,
         and return its exit code. Honours stop requests.
@@ -407,7 +529,13 @@ class DebateRun:
             models = FAMILY_MODELS[family]
             frontier, weaker = models["frontier"], models["weaker"]
             limit_arg = f"++limit={n}"
-            threads_arg = "++anthropic_num_threads=5"
+            cases_at_a_time = CASES_AT_A_TIME[family]
+            judge_threads_arg = f"++anthropic_num_threads={cases_at_a_time}"
+            debate_threads_arg = f"++anthropic_num_threads={cases_at_a_time * BON}"
+            self._append_log(
+                f"[runner] family={family} cases_at_a_time={cases_at_a_time} "
+                f"(debate_threads={cases_at_a_time * BON}, judge_threads={cases_at_a_time})"
+            )
 
             # ---- Baselines (blind + oracle) ---------------------------------
             self._set_phase(Phase.BASELINES, "Running blind + oracle baselines.")
@@ -416,6 +544,8 @@ class DebateRun:
                     if self._stop_check():
                         self._finalise(Phase.STOPPED, "Stopped by user.")
                         return
+                    # core.debate needs BoN-aware thread count; judge/scoring don't.
+                    stage_threads = debate_threads_arg if stage == "core.debate" else judge_threads_arg
                     cmd = [
                         py,
                         "-m",
@@ -423,13 +553,17 @@ class DebateRun:
                         f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
                         f"+experiment={arm}",
                         limit_arg,
-                        threads_arg,
+                        stage_threads,
                         f"++judge.language_model.model={weaker}",
                         f"++judge_name={weaker}",
                     ]
                     rc = self._run_stage(f"{arm}:{stage}", cmd)
-                    if rc != 0:
-                        self._finalise(Phase.ERROR, f"{arm}:{stage} exited with code {rc}")
+                    outcome = self._stage_outcome(f"{arm}:{stage}", rc)
+                    if outcome == "stopped":
+                        self._finalise(Phase.STOPPED, "Stopped by user.")
+                        return
+                    if outcome is not None:
+                        self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                         return
 
             # ---- Debate generation -----------------------------------------
@@ -444,7 +578,7 @@ class DebateRun:
                 f"exp_dir={self._hydra_exp_dir(self.family_dir)}",
                 "+experiment=medical_debate",
                 limit_arg,
-                threads_arg,
+                debate_threads_arg,
                 f"++correct_debater.language_model.model={frontier}",
                 f"++incorrect_debater.language_model.model={frontier}",
                 f"++correct_preference.language_model.model={frontier}",
@@ -455,8 +589,12 @@ class DebateRun:
                 "++incorrect_debater.language_model.temperature=0.8",
             ]
             rc = self._run_stage("debate", debate_cmd)
-            if rc != 0:
-                self._finalise(Phase.ERROR, f"debate exited with code {rc}")
+            outcome = self._stage_outcome("debate", rc)
+            if outcome == "stopped":
+                self._finalise(Phase.STOPPED, "Stopped by user.")
+                return
+            if outcome is not None:
+                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
 
             # ---- Final-judge E1-E4 -----------------------------------------
@@ -476,17 +614,25 @@ class DebateRun:
                     f"exp_dir={self._hydra_exp_dir(self.family_dir)}",
                     f"+experiment={experiment}",
                     limit_arg,
-                    threads_arg,
+                    judge_threads_arg,
                     f"++judge.language_model.model={judge_model}",
                     f"++judge_name={judge_name}",
                 ]
                 rc = self._run_stage(f"{cond}:judge", [py, "-m", "core.judge", *common])
-                if rc != 0:
-                    self._finalise(Phase.ERROR, f"{cond}:judge exited with code {rc}")
+                outcome = self._stage_outcome(f"{cond}:judge", rc)
+                if outcome == "stopped":
+                    self._finalise(Phase.STOPPED, "Stopped by user.")
+                    return
+                if outcome is not None:
+                    self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                     return
                 rc = self._run_stage(f"{cond}:score", [py, "-m", "core.scoring.accuracy", *common])
-                if rc != 0:
-                    self._finalise(Phase.ERROR, f"{cond}:score exited with code {rc}")
+                outcome = self._stage_outcome(f"{cond}:score", rc)
+                if outcome == "stopped":
+                    self._finalise(Phase.STOPPED, "Stopped by user.")
+                    return
+                if outcome is not None:
+                    self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                     return
 
             # ---- Concession judge ------------------------------------------
@@ -501,14 +647,18 @@ class DebateRun:
                 f"exp_dir={self._hydra_exp_dir(self.family_dir)}",
                 "+experiment=medical_debate",
                 limit_arg,
-                threads_arg,
+                judge_threads_arg,
                 "++judge_type=concession",
                 f"++concession_judge.language_model.model={self.concession_model}",
                 f"++judge_name=concession_{self.concession_model}",
             ]
             rc = self._run_stage("concession", concession_cmd)
-            if rc != 0:
-                self._finalise(Phase.ERROR, f"concession judge exited with code {rc}")
+            outcome = self._stage_outcome("concession", rc)
+            if outcome == "stopped":
+                self._finalise(Phase.STOPPED, "Stopped by user.")
+                return
+            if outcome is not None:
+                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
 
             # ---- Analysis + aggregation ------------------------------------
@@ -520,8 +670,12 @@ class DebateRun:
                 "analysis",
                 [py, "scripts/analyze_medical_debate.py", str(self.family_dir)],
             )
-            if rc != 0:
-                self._finalise(Phase.ERROR, f"analysis exited with code {rc}")
+            outcome = self._stage_outcome("analysis", rc)
+            if outcome == "stopped":
+                self._finalise(Phase.STOPPED, "Stopped by user.")
+                return
+            if outcome is not None:
+                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
             rc = self._run_stage(
                 "aggregate",
@@ -535,8 +689,12 @@ class DebateRun:
                     str(self.results_dir),
                 ],
             )
-            if rc != 0:
-                self._finalise(Phase.ERROR, f"aggregate exited with code {rc}")
+            outcome = self._stage_outcome("aggregate", rc)
+            if outcome == "stopped":
+                self._finalise(Phase.STOPPED, "Stopped by user.")
+                return
+            if outcome is not None:
+                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
 
             self._finalise(Phase.DONE, "Finished.")

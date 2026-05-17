@@ -150,7 +150,6 @@ wandb/
 
 # Local-only working files (not for the public repo)
 CLAUDE.md
-Medical Debate.docx
 PLAN.md
 LOCAL_RUNBOOK.md
 EDA.ipynb

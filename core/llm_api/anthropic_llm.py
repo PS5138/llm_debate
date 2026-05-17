@@ -53,12 +53,30 @@ ANTHROPIC_MODELS = {
     "claude-2.1",
 }
 
-# Anthropic Messages API requires max_tokens. 4096 is generous for
-# debate / judging (per-round arguments are capped at 150 words ≈ 200
-# tokens; judging is typically <500 tokens). Reasoning-class models like
-# Opus 4.7 emit hidden reasoning tokens that count against this budget,
-# so don't set it too low.
-DEFAULT_MAX_TOKENS = 4096
+# Anthropic Messages API requires max_tokens. Per-round debate arguments
+# are capped at ~150 words (~200 tokens) and answer-judge outputs are
+# typically <500 tokens of final text, but adaptive-thinking models
+# (Opus 4.7) and extended-thinking models (Sonnet 4.6 in oracle mode
+# with full patient evidence in context) emit a lot of hidden reasoning
+# tokens that count against this budget. 4096 was getting truncated on
+# E3 oracle judging — bumped to 8192 so Sonnet 4.6 has room to finish.
+DEFAULT_MAX_TOKENS = 8192
+
+# Starting with Opus 4.7, Anthropic rejects any non-default `temperature`,
+# `top_p`, or `top_k` with a 400. Those models control sampling internally
+# via adaptive thinking; the migration guide tells callers to omit the
+# sampling params entirely and to rely on prompting for behavioural
+# variation. Add future models here as they ship (the Anthropic doc
+# wording is "starting with Claude Opus 4.7", so any newer model is
+# expected to follow the same rule).
+_PREFIXES_WITHOUT_SAMPLING_PARAMS = (
+    "claude-opus-4-7",
+)
+
+
+def _rejects_sampling_params(model_id: str) -> bool:
+    mid = model_id.lower()
+    return any(mid.startswith(p) for p in _PREFIXES_WITHOUT_SAMPLING_PARAMS)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,10 +96,14 @@ def count_tokens(prompt) -> int:
 def price_per_token(model_id: str) -> tuple[float, float]:
     """Return (input, output) price per token in USD.
 
-    List rates as of 2026 (per million tokens):
-      Opus 4.7        — $15  / $75
-      Sonnet 4.6      — $3   / $15
-      Haiku 4.5       — $1   / $5
+    List rates as of 2026 (per million tokens; from Anthropic's
+    `platform.claude.com/docs/.../models/overview`):
+      Opus 4.7        — $5  / $25
+      Opus 4.6        — $5  / $25  (legacy generally available)
+      Opus 4.5        — $5  / $25  (legacy)
+      Opus 4.1        — $15 / $75  (legacy)
+      Sonnet 4.6      — $3  / $15
+      Haiku 4.5       — $1  / $5
       Claude 3.5 Sonnet — $3 / $15
       Claude 3.5 Haiku  — $0.80 / $4
       Claude 3 Opus     — $15 / $75
@@ -89,8 +111,11 @@ def price_per_token(model_id: str) -> tuple[float, float]:
       Claude 2.1        — $8  / $24
     """
     mid = model_id.lower()
-    if mid.startswith("claude-opus-4"):
+    if mid.startswith("claude-opus-4-1") or mid.startswith("claude-opus-4-20"):
+        # Pre-4.5 Opus snapshots kept the old $15 / $75 pricing.
         return 15e-6, 75e-6
+    if mid.startswith("claude-opus-4"):
+        return 5e-6, 25e-6
     if mid.startswith("claude-sonnet-4") or mid.startswith("claude-3-5-sonnet"):
         return 3e-6, 15e-6
     if mid.startswith("claude-haiku-4"):
@@ -206,10 +231,22 @@ class AnthropicChatModel(ModelAPIProtocol):
         # Allow-list of Anthropic Messages API parameters.
         allowed = {"temperature", "top_p", "top_k", "stop_sequences", "metadata"}
         call_kwargs = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
-        # Claude 4.x rejects requests that specify both sampling controls.
-        # The repo configs always set top_p=1.0, so keep the intentional
-        # temperature setting and omit top_p for Anthropic calls.
-        if "temperature" in call_kwargs and "top_p" in call_kwargs:
+        if _rejects_sampling_params(model_id):
+            dropped = [k for k in ("temperature", "top_p", "top_k") if k in call_kwargs]
+            for k in dropped:
+                call_kwargs.pop(k, None)
+            if dropped:
+                LOGGER.info(
+                    f"Dropping {dropped} for {model_id}: this model rejects "
+                    f"non-default sampling params and controls sampling "
+                    f"internally via adaptive thinking. BoN diversity now "
+                    f"comes from the model's own stochasticity + prompt "
+                    f"variation, not from temperature."
+                )
+        elif "temperature" in call_kwargs and "top_p" in call_kwargs:
+            # Older Claude 4.x rejects requests that specify both sampling
+            # controls. The repo configs always set top_p=1.0, so keep the
+            # intentional temperature setting and omit top_p.
             call_kwargs.pop("top_p")
         if system is not None:
             call_kwargs["system"] = system
@@ -303,10 +340,13 @@ class AnthropicChatModel(ModelAPIProtocol):
                         "partial transcripts will be reused."
                     ) from e
                 if isinstance(e, BadRequestError):
+                    detail = getattr(e, "message", None) or str(e)
                     raise RuntimeError(
-                        "Anthropic rejected the request as invalid. This is "
-                        "usually a configuration issue, not a transient API "
-                        "failure, so the call was not retried."
+                        f"Anthropic rejected the request as invalid (model={model_id}): "
+                        f"{detail}. This is usually a configuration issue (unknown "
+                        f"model name, account lacks access, max_tokens too small, "
+                        f"malformed parameters), not a transient API failure, so "
+                        f"the call was not retried."
                     ) from e
                 error_info = (
                     f"Exception Type: {type(e).__name__}, "

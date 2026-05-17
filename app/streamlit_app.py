@@ -26,6 +26,7 @@ from app.runner import (
     FAMILY_MODELS,
     Phase,
     estimate_cost_usd,
+    find_latest_run,
     transcript_rounds,
 )
 from core.scoring.accuracy import find_answer
@@ -120,6 +121,11 @@ def _swap_averaged_verdict(orig: str, swap: str) -> str:
 def _init_state() -> None:
     st.session_state.setdefault("run", None)
     st.session_state.setdefault("selected_case", None)
+    # Two-click confirmation gate so an accidental ▶ Run click can't burn $$.
+    # `confirm_armed` flips on after the first click; second click within the
+    # same configuration actually starts the run.
+    st.session_state.setdefault("confirm_armed", False)
+    st.session_state.setdefault("confirm_signature", None)  # (family, n_cases)
 
 
 _init_state()
@@ -151,12 +157,26 @@ with st.sidebar:
     n_cases = st.slider("Number of cases", min_value=1, max_value=100, value=3)
 
     est = estimate_cost_usd(family, n_cases)
-    st.markdown(
-        f"<div class='small-muted'>Rough cost estimate: <b>~${est:0.2f}</b> on your own key. "
-        f"BoN=4 × 3 rounds × 2 debaters × 4 final-judge arms + concession. "
-        f"Treat this as an upper-ish ballpark, not a quote.</div>",
-        unsafe_allow_html=True,
-    )
+    if est >= 20:
+        st.error(
+            f"Estimated cost on your own key: **~${est:0.2f}**. "
+            f"Calibrated against a May 2026 Anthropic smoke run "
+            f"(~$4/case on Opus 4.7, ~$2.50/case on gpt-5.5). "
+            f"Start with 1–3 cases to confirm the pipeline works on "
+            f"your account before spending more."
+        )
+    elif est >= 5:
+        st.warning(
+            f"Estimated cost on your own key: **~${est:0.2f}**. "
+            f"Real spend varies with case length and how chatty the "
+            f"models feel."
+        )
+    else:
+        st.info(
+            f"Estimated cost on your own key: **~${est:0.2f}**. "
+            f"Adaptive thinking on Opus 4.7 inflates Anthropic cost "
+            f"beyond the headline $5 / $25 per million."
+        )
 
     st.divider()
     st.subheader("API keys (session only)")
@@ -180,10 +200,25 @@ with st.sidebar:
         Phase.ANALYSIS,
     }
 
+    # Two-click confirmation. The first click arms the button; the second
+    # click (with the same family + n_cases) actually starts the run. If
+    # the user changes settings in between, the armed state is dropped.
+    signature = (family, n_cases)
+    confirm_armed = (
+        st.session_state.get("confirm_armed", False)
+        and st.session_state.get("confirm_signature") == signature
+    )
+
+    run_label = (
+        f"✅ Confirm: spend ~${est:0.2f}"
+        if confirm_armed
+        else f"▶ Run ({n_cases} case{'s' if n_cases != 1 else ''}, ~${est:0.2f})"
+    )
+
     col_a, col_b = st.columns(2)
     with col_a:
         start_clicked = st.button(
-            "▶ Run",
+            run_label,
             type="primary",
             disabled=is_active,
             width="stretch",
@@ -192,6 +227,34 @@ with st.sidebar:
         stop_clicked = st.button(
             "⏹ Stop",
             disabled=not is_active,
+            width="stretch",
+        )
+
+    if confirm_armed:
+        st.caption(
+            "Click **Confirm** to start. Change any setting above to cancel."
+        )
+
+    # ---- Resume previous run ------------------------------------------
+    latest = find_latest_run() if not is_active else None
+    resume_clicked = False
+    if latest is not None:
+        st.divider()
+        st.subheader("Resume previous run")
+        st.caption(
+            f"Most recent run on disk: `{latest['exp_dir'].name}` "
+            f"({latest['family']}, n={latest['n_cases']}). "
+            f"Recorded {latest.get('recorded_at_utc', 'unknown')}."
+        )
+        st.caption(
+            "Resume re-runs the full pipeline against that exp dir. "
+            "Stages with already-complete rows are skipped automatically "
+            "by the underlying pipeline (e.g. if 66/100 cases finished "
+            "debating, only cases 67–100 will be debated again)."
+        )
+        resume_clicked = st.button(
+            f"↻ Resume {latest['family']} n={latest['n_cases']}",
+            disabled=is_active,
             width="stretch",
         )
 
@@ -223,13 +286,40 @@ if stop_clicked and run is not None:
     run.stop()
 
 if start_clicked:
+    if not confirm_armed:
+        # First click: arm the confirmation. Show a confirm button on the
+        # next rerender.
+        st.session_state["confirm_armed"] = True
+        st.session_state["confirm_signature"] = signature
+        st.rerun()
+    else:
+        # Second click: actually launch.
+        st.session_state["confirm_armed"] = False
+        st.session_state["confirm_signature"] = None
+        _cleanup_run()
+        try:
+            new_run = DebateRun(
+                family=family,
+                n_cases=n_cases,
+                openai_key=openai_key.strip(),
+                anthropic_key=anthropic_key.strip(),
+            )
+            new_run.start()
+            st.session_state["run"] = new_run
+            st.session_state["selected_case"] = None
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+if resume_clicked and latest is not None:
     _cleanup_run()
     try:
         new_run = DebateRun(
-            family=family,
-            n_cases=n_cases,
+            family=latest["family"],
+            n_cases=latest["n_cases"],
             openai_key=openai_key.strip(),
             anthropic_key=anthropic_key.strip(),
+            resume_from=latest["exp_dir"],
         )
         new_run.start()
         st.session_state["run"] = new_run

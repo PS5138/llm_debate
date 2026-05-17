@@ -10,6 +10,11 @@ from omegaconf import DictConfig
 from core.file_handler import Experiment
 
 UNKNOWN_THRESHOLD = 20
+# Minimum sample size before the unknown-proportion threshold is treated
+# as a fatal error. Below this, the threshold is advisory only (logged
+# but not raised) so that smoke tests with a handful of cases aren't
+# killed by a single truncated judge response.
+UNKNOWN_THRESHOLD_MIN_N = 10
 LOGGER = logging.getLogger(__name__)
 
 
@@ -194,8 +199,18 @@ def score_file(
     unknown_proportion = 100 * count_unknown / total / n_votes
 
     if unknown_proportion > UNKNOWN_THRESHOLD:
-        raise ValueError(
-            f"WARNING: {unknown_proportion} unknown proportion ({count_unknown} out of {total}))"
+        msg = (
+            f"unknown-judgement proportion {unknown_proportion:.1f}% "
+            f"({count_unknown} out of {total}) exceeds threshold "
+            f"{UNKNOWN_THRESHOLD}%."
+        )
+        if total >= UNKNOWN_THRESHOLD_MIN_N:
+            raise ValueError(msg)
+        LOGGER.warning(
+            "%s sample is small (n=%d < %d), continuing anyway. "
+            "Investigate whether the judge ran out of max_tokens "
+            "before printing 'Answer: A/B'.",
+            msg, total, UNKNOWN_THRESHOLD_MIN_N,
         )
 
     results = pd.DataFrame(

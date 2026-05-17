@@ -2,6 +2,8 @@
 
 **Can AI debate help a weaker judge choose the right medical diagnosis?**
 
+![Live debate viewer](assets/streamlit-demo.png)
+
 ## Introduction
 
 This repository is a work-in-progress research fork of
@@ -230,6 +232,39 @@ tie-break judging pass.
 
 The preference judge is only an internal argument-selection mechanism. The
 final answer judges run after the full transcript has been generated.
+
+#### Sampling Asymmetry Between Families
+
+BoN candidate diversity does not come from the same mechanism across the two
+model families, which is worth flagging as a methodological asymmetry.
+
+For the OpenAI family, both debaters are sampled at `temperature=0.8`,
+matching the configuration used by Khan et al. for QuALITY. The four BoN
+candidates per debater turn are therefore drawn from a relatively warm
+distribution and tend to differ meaningfully in wording and emphasis.
+
+For the Anthropic family, Claude Opus 4.7 rejects any non-default
+`temperature`, `top_p`, or `top_k` (the Anthropic Messages API returns
+HTTP 400; see Anthropic's [migration guide][opus-4-7-migration]). Opus 4.7
+controls sampling internally via adaptive thinking, and the documented
+guidance is to omit the sampling parameters entirely and rely on prompting
+for behavioural variation. The repo's Anthropic adapter therefore drops
+`temperature` (and `top_p`, `top_k`) before each Opus 4.7 call. BoN
+candidates from Opus 4.7 are still four independent samples, but their
+diversity reflects whatever stochasticity the model exposes by default,
+not an experimenter-chosen temperature.
+
+This does not change the BoN selection mechanism — the preference judge
+still rates four candidates and writes the top one into the transcript —
+but it does mean head-to-head comparisons across families should not be
+read as a clean controlled comparison of the underlying models. Any
+observed gap between OpenAI and Anthropic accuracy or PGR could reflect
+this sampling-control difference in addition to model capability.
+
+Earlier Anthropic models (Sonnet 4.6, Opus 4.6, Haiku 4.5) still accept
+`temperature` and are unaffected by the strip.
+
+[opus-4-7-migration]: https://platform.claude.com/docs/en/about-claude/models/migration-guide
 
 ### Judges
 
@@ -471,8 +506,14 @@ What it does:
   accuracy/PGR tables and the generated plots from `medical_results/`.
 - **Clear run** deletes only the temporary session SECRETS/log files and leaves
   the timestamped `exp/` output folder in place.
-- **Stop** cancels the current run. Starting again creates a fresh results
-  folder and begins from baselines; the demo does not resume partial runs.
+- **Stop** cancels the current run (SIGTERM → SIGKILL escalation if the
+  subprocess doesn't exit within ~5s).
+- **Resume previous run** appears in the sidebar whenever a previous
+  timestamped results folder is detected under `exp/`. Clicking it
+  re-launches the same pipeline against that folder; the underlying
+  stages skip any rows that already have `complete=True`, so if a run
+  failed after 66 of 100 cases finished debating, resume picks up at
+  case 67 instead of starting over.
 
 Things to know before clicking **Run**:
 
