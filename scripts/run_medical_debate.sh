@@ -2,17 +2,19 @@
 # Run the medical debate pipeline for one model family.
 #
 # Usage:
-#   ./scripts/run_medical_debate.sh [N] [EXP_DIR] [FAMILY]
+#   ./scripts/run_medical_debate.sh [N] [EXP_DIR] [FAMILY] [BASELINES_DIR]
 #
 # Examples:
 #   ./scripts/run_medical_debate.sh 1 exp/medical_debate_smoke openai
 #   ./scripts/run_medical_debate.sh 20 exp/medical_debate_n20 openai
+#   ./scripts/run_medical_debate.sh 100 exp/medical_debate_n100 openai exp/medical_debate_n100/baselines
 
 set -euo pipefail
 
 LIMIT="${1:-100}"
 EXP_DIR="${2:-exp/medical_debate_n${LIMIT}}"
 FAMILY="${3:-openai}"
+BASELINES_DIR="${4:-${BASELINES_DIR:-${EXP_DIR}/baselines}}"
 THREADS="${THREADS:-5}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/medical-debate-matplotlib}"
@@ -27,7 +29,7 @@ if [[ "$FAMILY" == "anthropic" ]]; then
   WEAKER="${WEAKER:-claude-sonnet-4-6}"
 elif [[ "$FAMILY" == "openai" ]]; then
   FRONTIER="${FRONTIER:-gpt-5.5}"
-  WEAKER="${WEAKER:-gpt-4o-mini}"
+  WEAKER="${WEAKER:-gpt-5.4-mini}"
 else
   echo "unknown family: ${FAMILY}" >&2
   exit 1
@@ -91,6 +93,7 @@ echo ">>> Running bias-control analyses (verbosity / quote-rate / concession)"
 
 echo ">>> Aggregating accuracy + PGR + per-case lift (no API spend)"
 "$PYTHON" scripts/aggregate_medical_results.py "${EXP}" \
+  --baselines-dir "${BASELINES_DIR}" \
   --out-dir "${EXP_DIR}/medical_results"
 
 echo ">>> Summarising API spend from logs"
@@ -101,4 +104,5 @@ echo ">>> Summarising API spend from logs"
 echo ">>> Wrote consolidated output to ${EXP}/one_debate_outputs.md"
 echo ">>> Wrote analyses to ${EXP}/analysis/"
 echo ">>> Wrote aggregated results to ${EXP_DIR}/medical_results/"
+echo ">>> Used baselines from ${BASELINES_DIR}/ if present"
 echo ">>> Wrote cost summary to ${EXP}/cost_summary.csv"

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,8 @@ matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.scoring.accuracy import find_answer
 
@@ -107,9 +110,9 @@ def _scan_family_dir(family_dir: Path, family_label: str) -> pd.DataFrame:
 def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
     """Walk a baselines directory and collect per-case baseline correctness.
 
-    Expected layout (one judge model per subdir):
-        <baselines_dir>/<judge>/baseline_blind/data0[_swap]_judgement.csv
-        <baselines_dir>/<judge>/baseline_oracle/data0[_swap]_judgement.csv
+    Expected layout:
+        <baselines_dir>/baseline_blind/<judge>/data0[_swap]_judgement.csv
+        <baselines_dir>/baseline_oracle/<judge>/data0[_swap]_judgement.csv
 
     Returns an empty DataFrame if no baselines have been run yet — the
     rest of the pipeline tolerates this and just leaves PGR as NaN.
@@ -118,18 +121,18 @@ def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows: list[dict] = []
-    for judge_dir in sorted(baselines_dir.iterdir()):
-        if not judge_dir.is_dir():
+    for arm in ("baseline_blind", "baseline_oracle"):
+        arm_dir = baselines_dir / arm
+        if not arm_dir.exists():
             continue
-        for arm in ("baseline_blind", "baseline_oracle"):
-            arm_dir = judge_dir / arm
-            if not arm_dir.exists():
+        for judge_dir in sorted(arm_dir.iterdir()):
+            if not judge_dir.is_dir():
                 continue
             for fname, swap in (
                 ("data0_judgement.csv", False),
                 ("data0_swap_judgement.csv", True),
             ):
-                p = arm_dir / fname
+                p = judge_dir / fname
                 if not p.exists():
                     continue
                 df = pd.read_csv(p, keep_default_na=False)

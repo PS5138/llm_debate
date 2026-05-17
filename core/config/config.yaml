@@ -60,7 +60,7 @@ judge_type: "judge"
 round_limit: null
 
 # Scoring
-dataset: "quality"
+dataset: "medical"
 medical_source_path: "data/ddxplus/ddxplus_debate_pilot_100.csv"
 n_votes: 1
 results_file_name: "results.csv"

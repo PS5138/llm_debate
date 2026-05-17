@@ -1,12 +1,12 @@
 # @package _global_
 
 defaults:
-  - debaters/v1@correct_debater
-  - debaters/v1@incorrect_debater
+  - debaters/medical_v1@correct_debater
+  - debaters/medical_v1@incorrect_debater
   - rollout: baseline
   - judge/baselines/medical_oracle@judge
-  - judge/debate/preference@correct_preference
-  - judge/debate/preference@incorrect_preference
+  - judge/debate/preference_medical@correct_preference
+  - judge/debate/preference_medical@incorrect_preference
   - _self_
 
 method: baseline

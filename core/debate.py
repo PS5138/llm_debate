@@ -11,7 +11,6 @@ from core.create_agents import setup_debate
 from core.file_handler import Experiment
 from core.llm_api.llm import ModelAPI
 from core.load.medical import main as medical_loader
-from core.load.quality import main as quality_loader
 from core.rollouts.rollout_base import RolloutBase
 from core.utils import (
     async_function_with_retry,
@@ -23,30 +22,15 @@ LOGGER = logging.getLogger(__name__)
 
 
 async def load_dataset(cfg: DictConfig, filename: Path):
-    if cfg.dataset == "medical":
-        medical_loader(
-            filename,
-            source_path=cfg.medical_source_path,
-            limit=cfg.limit,
+    if cfg.dataset != "medical":
+        raise ValueError(
+            f"Unsupported dataset {cfg.dataset!r}. This fork only supports the medical DDXPlus pipeline."
         )
-        return
 
-    await quality_loader(
+    medical_loader(
         filename,
-        split=cfg.split,
-        max_tokens=cfg.max_tokens_story,
+        source_path=cfg.medical_source_path,
         limit=cfg.limit,
-        sources=cfg.sources,
-        difficulty=cfg.difficulty,
-        ignore_nyu=cfg.ignore_nyu,
-        minimize_story_duplication=cfg.minimize_story_duplication,
-        max_answerability=cfg.max_answerability,
-        min_untimed_accuracy=cfg.min_untimed_accuracy,
-        max_speed_accuracy=cfg.max_speed_accuracy,
-        min_context_required=cfg.min_context_required,
-        skip_conflicting_labels=cfg.skip_conflicting_labels,
-        max_num_from_same_story=cfg.max_num_from_same_story,
-        human_experiments=cfg.human_experiments,
     )
 
 
@@ -132,7 +116,7 @@ async def async_main(cfg: DictConfig):
         cfg.method_type,
         cfg.use_intermediary,
     )
-    if cfg.method_type == "baseline":
+    if cfg.method == "baseline":
         assert cfg.rollout.num_steps == 0, "Baseline requires num_steps to be 0"
     if cfg.method_type == "seq":
         assert (

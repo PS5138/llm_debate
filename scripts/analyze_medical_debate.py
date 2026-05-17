@@ -1,7 +1,7 @@
 """Bias-control analyses for the medical debate pipeline.
 
 Reads the cached debate transcripts and judgement CSVs produced by
-`scripts/run_medical_debate.sh` and writes three diagnostic artefacts:
+`scripts/run_medical_debate.sh` and writes four diagnostic artefacts:
 
   1. verbosity.csv        — argument word counts per side per round
   2. quote_verification.csv — verified vs unverified <quote> tags per side
@@ -9,6 +9,7 @@ Reads the cached debate transcripts and judgement CSVs produced by
                             (only populated if the concession judge has
                              been run; otherwise the file lists which
                              rows were missing)
+  4. debate_outcomes.csv  — counts of complete, conceded, and usable debates
 
 For every CSV, a matching `*_summary.txt` is also written that gives a
 small human-readable summary — useful when N is small (e.g. on a smoke
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +34,8 @@ matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Use the same normalisation rule as the judge so the verification rate
 # reported here matches what the judge actually trusted in the transcript.
@@ -62,6 +66,25 @@ def load_transcripts(debate_csv: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return transcripts
+
+
+def load_debate_rows(debate_csv: Path) -> pd.DataFrame:
+    """Return debate-stage rows with parse status for outcome accounting."""
+    df = pd.read_csv(debate_csv, keep_default_na=False)
+    if "complete" not in df.columns:
+        df["complete"] = False
+    df["complete"] = df["complete"].astype(str).str.lower().isin({"true", "1", "yes"})
+
+    parsed_ids = []
+    for _, row in df.iterrows():
+        try:
+            transcript = json.loads(row.get("transcript", ""))
+            parsed_ids.append(transcript.get("question_set_id") or transcript.get("index") or row.get("id"))
+        except (TypeError, json.JSONDecodeError):
+            parsed_ids.append("")
+    df["parsed_case_id"] = parsed_ids
+    df["transcript_parsed"] = df["parsed_case_id"].astype(str).str.len() > 0
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +193,31 @@ def concession_rows(exp_dir: Path) -> Optional[list[dict]]:
     return out
 
 
+def debate_outcome_rows(debate_df: pd.DataFrame, concession_df: Optional[pd.DataFrame]) -> list[dict]:
+    """Summarise how many generated debates are usable after QC checks."""
+    total = len(debate_df)
+    complete = int(debate_df["complete"].sum()) if not debate_df.empty else 0
+    parsed = int(debate_df["transcript_parsed"].sum()) if not debate_df.empty else 0
+    complete_and_parsed = min(complete, parsed)
+    incomplete_or_unparsed = total - complete_and_parsed
+
+    conceded = 0
+    concession_judged = 0
+    if concession_df is not None and not concession_df.empty:
+        concession_judged = min(int(len(concession_df)), complete_and_parsed)
+        conceded = int(concession_df["conceded"].sum())
+
+    usable = max(0, concession_judged - conceded)
+    missing_concession_judgement = max(0, complete_and_parsed - concession_judged)
+
+    return [
+        {"status": "usable_non_conceded", "count": usable},
+        {"status": "conceded", "count": conceded},
+        {"status": "complete_missing_concession_judgement", "count": missing_concession_judgement},
+        {"status": "incomplete_or_unparsed", "count": incomplete_or_unparsed},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
@@ -230,6 +278,43 @@ def plot_concession(concession_df: pd.DataFrame, family_label: str, out_path: Pa
     plt.close(fig)
 
 
+def plot_debate_outcomes(outcomes_df: pd.DataFrame, family_label: str, out_path: Path) -> None:
+    """Stacked count bar: usable debates, concessions, and missing/incomplete rows."""
+    if outcomes_df.empty:
+        return
+    order = [
+        ("usable_non_conceded", "usable", "#3b8c4f"),
+        ("conceded", "conceded", "#d6643b"),
+        ("complete_missing_concession_judgement", "missing concession check", "#d6b33b"),
+        ("incomplete_or_unparsed", "incomplete/unparsed", "#8a8a8a"),
+    ]
+    counts = {
+        row["status"]: int(row["count"])
+        for _, row in outcomes_df.iterrows()
+    }
+    fig, ax = plt.subplots(figsize=(6.5, 4.2))
+    bottom = 0
+    for status, label, colour in order:
+        count = counts.get(status, 0)
+        if count == 0:
+            continue
+        ax.bar([family_label], [count], bottom=[bottom], label=label,
+               color=colour, edgecolor="black", linewidth=0.5)
+        ax.text(0, bottom + count / 2, str(count), ha="center", va="center",
+                fontsize=10, fontweight="bold")
+        bottom += count
+
+    total = sum(counts.values())
+    ax.set_ylabel("Debate count")
+    ax.set_title(f"Debate outcomes — {family_label} (n={total})")
+    ax.set_ylim(0, max(1, total) * 1.15)
+    ax.legend(loc="upper right")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_quote_verification(quotes_df: pd.DataFrame, family_label: str, out_path: Path) -> None:
     """Stacked bar per side: verified (green) + unverified (red).
     Reviewers ask 'did the debaters confabulate?' — this answers it.
@@ -283,6 +368,7 @@ def main(exp_dir: Path) -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     transcripts = load_transcripts(debate_csv)
+    debate_df = load_debate_rows(debate_csv)
     n_cases = len(transcripts)
     # Use the leaf dir name (typically `openai` or `anthropic`) as a label
     family_label = exp_dir.name or "run"
@@ -349,6 +435,7 @@ def main(exp_dir: Path) -> None:
 
     # 3. Concession ---------------------------------------------------------
     c_rows = concession_rows(exp_dir)
+    c = None
     if c_rows is None:
         (out_dir / "concession.csv").write_text(
             "concession judge has not been run on this exp_dir; "
@@ -389,6 +476,25 @@ def main(exp_dir: Path) -> None:
             ],
         )
         plot_concession(c, family_label, plots_dir / "05_concession_rate.png")
+
+    # 4. Debate outcomes ----------------------------------------------------
+    outcomes = pd.DataFrame(debate_outcome_rows(debate_df, c))
+    outcomes.to_csv(out_dir / "debate_outcomes.csv", index=False)
+    write_summary(
+        out_dir,
+        "debate_outcomes",
+        [
+            "Debate outcomes — count of generated debates after completion",
+            "and concession quality-control checks.",
+            "",
+            outcomes.to_string(index=False),
+            "",
+            "Interpretation: headline debate accuracy should be read over",
+            "usable_non_conceded debates. A large conceded or incomplete",
+            "count means the debate framing needs revision before scaling.",
+        ],
+    )
+    plot_debate_outcomes(outcomes, family_label, plots_dir / "07_debate_outcomes.png")
 
     print(f"wrote analysis to {out_dir}/")
 
