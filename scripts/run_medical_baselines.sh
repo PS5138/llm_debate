@@ -52,3 +52,9 @@ for arm in medical_blind medical_oracle; do
   "$PYTHON" -m core.judge            "exp_dir=${EXP_DIR}" "+experiment=${arm}" "${COMMON_ARGS[@]}"
   "$PYTHON" -m core.scoring.accuracy "exp_dir=${EXP_DIR}" "+experiment=${arm}" "${COMMON_ARGS[@]}"
 done
+
+# Emit blind-vs-oracle plots from the resulting results.csv (no API calls).
+if [[ -f "${EXP_DIR}/results.csv" ]]; then
+  echo ">>> Plotting blind vs oracle"
+  "$PYTHON" scripts/plot_baselines.py "${EXP_DIR}"
+fi

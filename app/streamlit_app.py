@@ -235,25 +235,51 @@ with st.sidebar:
             "Click **Confirm** to start. Change any setting above to cancel."
         )
 
-    # ---- Resume previous run ------------------------------------------
+    # ---- Resume or extend previous run --------------------------------
     latest = find_latest_run() if not is_active else None
     resume_clicked = False
+    resume_target_n = None
     if latest is not None:
         st.divider()
-        st.subheader("Resume previous run")
+        st.subheader("Resume / extend previous run")
+        prior_n = int(latest["n_cases"])
         st.caption(
-            f"Most recent run on disk: `{latest['exp_dir'].name}` "
-            f"({latest['family']}, n={latest['n_cases']}). "
+            f"Most recent run: `{latest['exp_dir'].name}` "
+            f"({latest['family']}, current n={prior_n}). "
             f"Recorded {latest.get('recorded_at_utc', 'unknown')}."
         )
+
+        resume_target_n = st.slider(
+            "Total cases after this run",
+            min_value=prior_n,
+            max_value=100,
+            value=prior_n,
+            help="Set to the same n to just retry incomplete work. Set higher "
+                 "to keep the already-finished cases and add new ones up to the "
+                 "new total. The pipeline writes back to the same `data0.csv` "
+                 "files, so cases 1..prior_n are not re-spent on.",
+        )
+
+        added = resume_target_n - prior_n
+        cost_str = ""
+        if added > 0:
+            extra_cost = estimate_cost_usd(latest["family"], added)
+            cost_str = f" (~${extra_cost:0.2f} for the {added} new case{'s' if added != 1 else ''})"
+
+        if added == 0:
+            button_label = f"↻ Resume incomplete work at n={prior_n}"
+        else:
+            button_label = f"➕ Extend from n={prior_n} to n={resume_target_n}{cost_str}"
+
         st.caption(
-            "Resume re-runs the full pipeline against that exp dir. "
-            "Stages with already-complete rows are skipped automatically "
-            "by the underlying pipeline (e.g. if 66/100 cases finished "
-            "debating, only cases 67–100 will be debated again)."
+            "Resume re-launches the pipeline against the existing folder. "
+            "Already-complete rows (`complete=True`, `complete_judge=True`) "
+            "are skipped automatically, so only new or incomplete cases hit "
+            "the API. Extension grows the working CSVs in place rather than "
+            "starting a fresh folder."
         )
         resume_clicked = st.button(
-            f"↻ Resume {latest['family']} n={latest['n_cases']}",
+            button_label,
             disabled=is_active,
             width="stretch",
         )
@@ -316,11 +342,19 @@ if resume_clicked and latest is not None:
     try:
         new_run = DebateRun(
             family=latest["family"],
-            n_cases=latest["n_cases"],
+            n_cases=int(resume_target_n) if resume_target_n is not None else latest["n_cases"],
             openai_key=openai_key.strip(),
             anthropic_key=anthropic_key.strip(),
             resume_from=latest["exp_dir"],
         )
+        # Surface the extension report so the user sees what got grown.
+        if new_run.extension_report:
+            added_total = sum(v for v in new_run.extension_report.values() if v)
+            if added_total > 0:
+                st.success(
+                    f"Extended {sum(1 for v in new_run.extension_report.values() if v)} "
+                    f"CSV file(s); {added_total} row-extensions written."
+                )
         new_run.start()
         st.session_state["run"] = new_run
         st.session_state["selected_case"] = None

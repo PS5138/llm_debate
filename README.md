@@ -475,12 +475,20 @@ What it does:
   the timestamped `exp/` output folder in place.
 - **Stop** cancels the current run (SIGTERM → SIGKILL escalation if the
   subprocess doesn't exit within ~5s).
-- **Resume previous run** appears in the sidebar whenever a previous
-  timestamped results folder is detected under `exp/`. Clicking it
-  re-launches the same pipeline against that folder; the underlying
-  stages skip any rows that already have `complete=True`, so if a run
-  failed after 66 of 100 cases finished debating, resume picks up at
-  case 67 instead of starting over.
+- **Resume / extend previous run** appears in the sidebar whenever a
+  previous timestamped results folder is detected under `exp/`. It
+  exposes a slider for the total case count after the run:
+  - Leave the slider at the existing `n` to re-run the same pipeline
+    against that folder. Stages with `complete=True` rows are skipped,
+    so if a run failed after 66 of 100 cases finished debating, the
+    resume only re-attempts cases 67–100.
+  - Move the slider higher than the existing `n` to **extend** the run
+    in place. The working `data0.csv` files (and any existing judgement
+    CSVs) are grown to the new total, preserving completion state on
+    earlier cases. The pipeline then only pays the API cost for the
+    newly-added cases. This is the recommended way to do chunked
+    review-as-you-go workflows ("run 10, look at results, extend to 20,
+    look, extend to 100").
 
 Things to know before clicking **Run**:
 

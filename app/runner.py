@@ -85,6 +85,119 @@ def create_results_root(base_dir: Path = REPO_ROOT / "exp") -> Path:
     return candidate
 
 
+def _extend_working_csv_from_pilot(working_csv: Path, target_n: int) -> int:
+    """Extend a `data{seed}.csv` (internal schema) so it has at least
+    `target_n` rows. New rows are pulled from the DDXPlus pilot CSV via
+    the medical loader, then merged in while preserving any per-row
+    state already on disk (complete flag, transcript, answer, etc.).
+
+    Returns the number of rows added.
+    """
+    if not working_csv.exists():
+        return 0
+    df = pd.read_csv(working_csv, keep_default_na=False)
+    current = len(df)
+    if current >= target_n:
+        return 0
+
+    # Use the project's own loader to emit `target_n` fresh rows in
+    # internal schema, then take the slice we don't already have.
+    from core.load.medical import main as medical_loader
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tf:
+        tmp_path = Path(tf.name)
+    try:
+        medical_loader(tmp_path, source_path=PILOT_CSV, limit=target_n)
+        fresh = pd.read_csv(tmp_path, keep_default_na=False)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    new_rows = fresh.iloc[current:target_n].copy()
+    # Fill any columns that the live CSV has but the freshly-loaded slice
+    # doesn't (e.g. complete_judge / answer_judge added by core.judge on
+    # earlier runs). Defaults are False for completion flags, "" otherwise.
+    for col in df.columns:
+        if col not in new_rows.columns:
+            if col.startswith("complete"):
+                new_rows[col] = False
+            else:
+                new_rows[col] = ""
+    new_rows = new_rows[df.columns]
+    out = pd.concat([df, new_rows], ignore_index=True)
+    out.to_csv(working_csv, index=False, encoding="utf-8")
+    return target_n - current
+
+
+def _extend_judgement_csv_from_data(judgement_csv: Path, data_csv: Path, target_n: int) -> int:
+    """Extend a `*_judgement.csv` so it has at least `target_n` rows.
+
+    New rows are taken from the sibling `data0.csv` (which should have
+    already been extended to >= target_n). Completion flags are reset to
+    False so the next pipeline pass will judge them.
+    """
+    if not judgement_csv.exists() or not data_csv.exists():
+        return 0
+    jdf = pd.read_csv(judgement_csv, keep_default_na=False)
+    current = len(jdf)
+    if current >= target_n:
+        return 0
+    sdf = pd.read_csv(data_csv, keep_default_na=False)
+    if len(sdf) < target_n:
+        return 0  # data wasn't extended yet; nothing safe to do here
+
+    new_rows = sdf.iloc[current:target_n].copy()
+    for col in jdf.columns:
+        if col not in new_rows.columns:
+            if col.startswith("complete"):
+                new_rows[col] = False
+            else:
+                new_rows[col] = ""
+    new_rows = new_rows[jdf.columns]
+    out = pd.concat([jdf, new_rows], ignore_index=True)
+    out.to_csv(judgement_csv, index=False, encoding="utf-8")
+    return target_n - current
+
+
+def extend_run_to_n_cases(exp_dir: Path, family: str, target_n: int) -> dict:
+    """Walk an existing run's exp dir and extend every working CSV +
+    judgement CSV to `target_n` rows. The pipeline can then re-run and
+    will skip already-complete rows, only spending API calls on the
+    newly-appended cases.
+
+    Returns a {relative_path: rows_added} report for logging.
+    """
+    report: dict = {}
+    working_files = [
+        exp_dir / "baselines" / family / "baseline_blind" / "data0.csv",
+        exp_dir / "baselines" / family / "baseline_oracle" / "data0.csv",
+        exp_dir / family / "debate_sim" / "data0.csv",
+        exp_dir / family / "debate_sim" / "data0_swap.csv",
+    ]
+    # Step 1: extend the data CSVs from the pilot.
+    for wf in working_files:
+        if wf.exists():
+            added = _extend_working_csv_from_pilot(wf, target_n)
+            report[str(wf.relative_to(exp_dir))] = added
+
+    # Step 2: extend any judgement CSVs from their sibling data0.csv.
+    for wf in working_files:
+        if not wf.exists():
+            continue
+        parent = wf.parent
+        # Only data0.csv has judge subdirs; data0_swap.csv lives alongside
+        # but is consumed by the same judge dirs.
+        if wf.name != "data0.csv":
+            continue
+        for sub in parent.iterdir():
+            if not sub.is_dir():
+                continue
+            for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
+                jp = sub / fname
+                if jp.exists():
+                    added = _extend_judgement_csv_from_data(jp, wf, target_n)
+                    report[str(jp.relative_to(exp_dir))] = added
+    return report
+
+
 def find_latest_run(base_dir: Path = REPO_ROOT / "exp") -> Optional[dict]:
     """Scan exp/ for the most recent `<timestamp>_results/` directory and
     return its metadata (family, n_cases, frontier/weaker models, path).
@@ -211,6 +324,7 @@ class DebateRun:
         # are skipped by core.debate; judgements with complete_judge=True
         # are skipped by core.judge). Fresh mode: create a new timestamped
         # results root under exp/.
+        self.extension_report: dict = {}
         if resume_from is not None:
             resolved = resume_from.resolve()
             if not resolved.exists():
@@ -225,6 +339,14 @@ class DebateRun:
         self.log_path = self._tempdir / "pipeline.log"
         if not self.is_resume:
             self._write_run_metadata("app/streamlit_app.py")
+        else:
+            # Extend any existing working / judgement CSVs to target_n,
+            # then update run_metadata so future resumes see the new n.
+            self.extension_report = extend_run_to_n_cases(
+                self.exp_dir, family, self.n_cases
+            )
+            if any(v > 0 for v in self.extension_report.values()):
+                self._update_run_metadata_for_extension()
 
         self._lock = threading.Lock()
         self._phase = Phase.PENDING
@@ -256,6 +378,35 @@ class DebateRun:
             self._initial_cases = []
 
     # ---------------------------------------------------------------- lifecycle
+
+    def _update_run_metadata_for_extension(self) -> None:
+        """Bump n_cases + last_updated_at_utc in run_metadata.json after
+        extending a previous run. Preserves the original creation time
+        and any pre-existing fields the writer didn't know about.
+        """
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        family_meta = self.family_dir / "run_metadata.json"
+        if family_meta.exists():
+            try:
+                doc = json.loads(family_meta.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                doc = {}
+            doc["n_cases"] = self.n_cases
+            doc["last_updated_at_utc"] = now
+            family_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+        root_meta = self.exp_dir / "run_metadata.json"
+        if root_meta.exists():
+            try:
+                doc = json.loads(root_meta.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                doc = {}
+            doc["last_updated_at_utc"] = now
+            families = doc.setdefault("families", {})
+            f = families.setdefault(self.family, {})
+            f["n_cases"] = self.n_cases
+            f["last_updated_at_utc"] = now
+            root_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
     def _write_run_metadata(self, entrypoint: str) -> None:
         models = FAMILY_MODELS[self.family]
