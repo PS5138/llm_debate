@@ -27,6 +27,52 @@ class JudgeType(StrEnum):
     concession = "concession"
 
 
+def _reconcile_judgement_with_data(data_csv: Path, judgement_csv: Path) -> None:
+    """Bring a pre-existing judgement CSV back into agreement with the
+    debate-stage `data*.csv` it was originally seeded from.
+
+    Two cases need to be handled when a previous run is resumed or
+    extended:
+      * The data CSV has gained rows the judgement CSV doesn't know
+        about (e.g. the app extended the working files from 5 to 10
+        cases). Append the new rows with empty judge columns so the
+        judge stage can process them.
+      * The data CSV has updated `complete` or `transcript` for rows
+        the judgement CSV already has (e.g. debate just ran and filled
+        in transcripts). Copy those columns across so the assertion
+        in `run_judge` ("debate must be done before judging") passes
+        and the judge sees the correct transcript text.
+
+    `answer_judge`, `complete_judge`, and any other judge-stage output
+    columns are preserved on rows that already had them — this is the
+    important property that makes resume/extend safe.
+    """
+    if not data_csv.exists() or not judgement_csv.exists():
+        return
+    data_df = pd.read_csv(data_csv, keep_default_na=False)
+    j_df = pd.read_csv(judgement_csv, keep_default_na=False)
+
+    # Append any rows the judgement CSV is missing.
+    if len(data_df) > len(j_df):
+        new_rows = data_df.iloc[len(j_df):].copy()
+        for col in j_df.columns:
+            if col not in new_rows.columns:
+                if col.startswith("complete"):
+                    new_rows[col] = False
+                else:
+                    new_rows[col] = ""
+        new_rows = new_rows[j_df.columns]
+        j_df = pd.concat([j_df, new_rows], ignore_index=True)
+
+    # Sync columns that are owned by the data CSV (not by the judge).
+    n = min(len(data_df), len(j_df))
+    for col in ("complete", "transcript"):
+        if col in data_df.columns and col in j_df.columns and n > 0:
+            j_df.loc[: n - 1, col] = data_df.loc[: n - 1, col].values
+
+    j_df.to_csv(judgement_csv, index=False)
+
+
 async def run_judge(
     judge: JudgeBase,
     filename: Path,
@@ -158,6 +204,8 @@ async def async_main(cfg: DictConfig):
     filename_judgement.parent.mkdir(exist_ok=True, parents=True)
     if not filename_judgement.exists():
         copyfile(filename, filename_judgement)
+    else:
+        _reconcile_judgement_with_data(filename, filename_judgement)
 
     complete = await async_function_with_retry(
         run_judge,
@@ -190,6 +238,11 @@ async def async_main(cfg: DictConfig):
                 copyfile(filename_swap, filename_swap_judgement)
             else:
                 copyfile(filename, filename_swap_judgement)
+    else:
+        # Sim mode reuses data0.csv for the swap judgement, so reconcile
+        # against whichever source the judge was originally seeded from.
+        swap_source = filename_swap if filename_swap.exists() else filename
+        _reconcile_judgement_with_data(swap_source, filename_swap_judgement)
 
     complete_swap = await async_function_with_retry(
         run_judge,

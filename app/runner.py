@@ -127,41 +127,16 @@ def _extend_working_csv_from_pilot(working_csv: Path, target_n: int) -> int:
     return target_n - current
 
 
-def _extend_judgement_csv_from_data(judgement_csv: Path, data_csv: Path, target_n: int) -> int:
-    """Extend a `*_judgement.csv` so it has at least `target_n` rows.
-
-    New rows are taken from the sibling `data0.csv` (which should have
-    already been extended to >= target_n). Completion flags are reset to
-    False so the next pipeline pass will judge them.
-    """
-    if not judgement_csv.exists() or not data_csv.exists():
-        return 0
-    jdf = pd.read_csv(judgement_csv, keep_default_na=False)
-    current = len(jdf)
-    if current >= target_n:
-        return 0
-    sdf = pd.read_csv(data_csv, keep_default_na=False)
-    if len(sdf) < target_n:
-        return 0  # data wasn't extended yet; nothing safe to do here
-
-    new_rows = sdf.iloc[current:target_n].copy()
-    for col in jdf.columns:
-        if col not in new_rows.columns:
-            if col.startswith("complete"):
-                new_rows[col] = False
-            else:
-                new_rows[col] = ""
-    new_rows = new_rows[jdf.columns]
-    out = pd.concat([jdf, new_rows], ignore_index=True)
-    out.to_csv(judgement_csv, index=False, encoding="utf-8")
-    return target_n - current
-
-
 def extend_run_to_n_cases(exp_dir: Path, family: str, target_n: int) -> dict:
-    """Walk an existing run's exp dir and extend every working CSV +
-    judgement CSV to `target_n` rows. The pipeline can then re-run and
-    will skip already-complete rows, only spending API calls on the
-    newly-appended cases.
+    """Walk an existing run's exp dir and extend every working `data*.csv`
+    to `target_n` rows. New rows have `complete=False` so the next pipeline
+    pass will process them.
+
+    Judgement CSVs (`<arm>_<judge>/data0[_swap]_judgement.csv`) are NOT
+    extended here. `core/judge.py` reconciles them against their sibling
+    `data0.csv` at the start of every judge stage — that path correctly
+    handles both row appends and `complete`/`transcript` re-sync, and is
+    the single place where judgement CSVs get mutated.
 
     Returns a {relative_path: rows_added} report for logging.
     """
@@ -172,29 +147,10 @@ def extend_run_to_n_cases(exp_dir: Path, family: str, target_n: int) -> dict:
         exp_dir / family / "debate_sim" / "data0.csv",
         exp_dir / family / "debate_sim" / "data0_swap.csv",
     ]
-    # Step 1: extend the data CSVs from the pilot.
     for wf in working_files:
         if wf.exists():
             added = _extend_working_csv_from_pilot(wf, target_n)
             report[str(wf.relative_to(exp_dir))] = added
-
-    # Step 2: extend any judgement CSVs from their sibling data0.csv.
-    for wf in working_files:
-        if not wf.exists():
-            continue
-        parent = wf.parent
-        # Only data0.csv has judge subdirs; data0_swap.csv lives alongside
-        # but is consumed by the same judge dirs.
-        if wf.name != "data0.csv":
-            continue
-        for sub in parent.iterdir():
-            if not sub.is_dir():
-                continue
-            for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
-                jp = sub / fname
-                if jp.exists():
-                    added = _extend_judgement_csv_from_data(jp, wf, target_n)
-                    report[str(jp.relative_to(exp_dir))] = added
     return report
 
 
