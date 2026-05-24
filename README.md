@@ -216,6 +216,8 @@ analysis reads.
 
 ### Debate Generation
 
+![Debate transcript viewer in the Streamlit app](assets/streamlit-demo-final.png)
+
 Each debate has three rounds. Both debaters see the structured patient evidence;
 one is assigned the correct diagnosis and the other is assigned the plausible
 distractor. The debaters are prompted to argue for their assigned answer and to
