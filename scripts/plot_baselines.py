@@ -38,7 +38,18 @@ def _load_results(results_csv: Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"{results_csv} is missing columns: {sorted(missing)}")
     df["swap"] = df["swap"].astype(str).str.lower().map({"true": True, "false": False})
-    return df[df["method"].isin(ARM_ORDER)].copy()
+    df = df[df["method"].isin(ARM_ORDER)].copy()
+    # `core.scoring.accuracy` appends a row per invocation, so a `results.csv`
+    # from a run that has been extended N times carries 4*N duplicate rows
+    # (one per arm × swap, per extension). Two consequences if we don't
+    # deduplicate: (1) `reindex(ARM_ORDER)` in plot_position_bias crashes
+    # because the index has duplicates, and (2) `_swap_averaged` averages
+    # every historical snapshot instead of the latest n. Keep only the
+    # latest row per (method, swap), sorted by `num_matches` so the row
+    # with the most cases wins.
+    df = df.sort_values(["method", "swap", "num_matches"], kind="stable")
+    df = df.drop_duplicates(subset=["method", "swap"], keep="last").reset_index(drop=True)
+    return df
 
 
 def _swap_averaged(df: pd.DataFrame) -> pd.DataFrame:

@@ -31,6 +31,35 @@ import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PILOT_CSV = REPO_ROOT / "data" / "ddxplus" / "ddxplus_debate_pilot_100.csv"
+CANONICAL_BASELINES_ROOT = REPO_ROOT / "data" / "canonical_baselines"
+
+
+def canonical_baselines_path(family: str) -> Optional[Path]:
+    """Return the committed canonical baselines dir for a family if it has
+    been *fully* populated, else None.
+
+    Required layout:
+      <family>/results.csv
+      <family>/baseline_blind/<judge>/data0_judgement.csv
+      <family>/baseline_blind/<judge>/data0_swap_judgement.csv
+      <family>/baseline_oracle/<judge>/data0_judgement.csv
+      <family>/baseline_oracle/<judge>/data0_swap_judgement.csv
+
+    A partial folder (e.g. blind but no oracle, or no swap variants) would
+    silently produce NaN baselines / PGR in the aggregator, so we require
+    all four judgement CSVs before honouring the folder as canonical.
+    """
+    path = CANONICAL_BASELINES_ROOT / family
+    if not (path / "results.csv").exists():
+        return None
+    for arm in ("baseline_blind", "baseline_oracle"):
+        arm_dir = path / arm
+        if not arm_dir.exists():
+            return None
+        for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
+            if not any(arm_dir.rglob(fname)):
+                return None
+    return path
 
 FAMILY_MODELS = {
     "openai": {"frontier": "gpt-5.5", "weaker": "gpt-5.4-mini"},
@@ -182,6 +211,16 @@ def find_latest_run(base_dir: Path = REPO_ROOT / "exp") -> Optional[dict]:
             continue
         # Take the first (usually only) family recorded.
         family_name, family_record = next(iter(families.items()))
+        # Recover the run's original baseline source so resume can honour
+        # it. Older metadata didn't record `using_canonical_baselines`
+        # explicitly, so infer it from whether the recorded `baselines_dir`
+        # equals the canonical path for this family.
+        recorded_baselines_dir = family_record.get("baselines_dir")
+        baselines_dir = Path(recorded_baselines_dir) if recorded_baselines_dir else None
+        using_canonical = family_record.get("using_canonical_baselines")
+        if using_canonical is None:
+            canonical = CANONICAL_BASELINES_ROOT / family_name
+            using_canonical = baselines_dir is not None and baselines_dir.resolve() == canonical.resolve()
         return {
             "exp_dir": cand,
             "family": family_name,
@@ -189,6 +228,8 @@ def find_latest_run(base_dir: Path = REPO_ROOT / "exp") -> Optional[dict]:
             "frontier_model": family_record.get("frontier_model"),
             "weaker_model": family_record.get("weaker_model"),
             "recorded_at_utc": family_record.get("recorded_at_utc"),
+            "baselines_dir": baselines_dir,
+            "using_canonical_baselines": bool(using_canonical),
         }
     return None
 
@@ -240,6 +281,7 @@ class DebateRun:
         anthropic_key: str,
         concession_model: str = "gpt-4o-mini",
         resume_from: Optional[Path] = None,
+        use_canonical_baselines: bool = True,
     ) -> None:
         if family not in FAMILY_MODELS:
             raise ValueError(f"unknown family: {family!r}")
@@ -289,20 +331,57 @@ class DebateRun:
         else:
             self.exp_root = create_results_root()
         self.exp_dir = self.exp_root
-        self.baselines_dir = self.exp_dir / "baselines" / family
         self.family_dir = self.exp_dir / family
         self.results_dir = self.exp_dir / "medical_results"
+        # Resolve the baselines source. Three cases:
+        #   1. Fresh run with canonical requested + canonical fully populated
+        #      → skip baseline-API stages, read from canonical.
+        #   2. Fresh run otherwise → compute baselines in-run.
+        #   3. Resume run → ALWAYS honour the metadata-recorded baseline
+        #      source for that run. Switching baseline source mid-run would
+        #      silently change PGR denominators and confuse comparisons, so
+        #      the sidebar toggle only applies to fresh runs.
+        fresh_baselines_dir = self.exp_dir / "baselines" / family
+        canonical_path = CANONICAL_BASELINES_ROOT / family
+        if self.is_resume:
+            recorded = self._read_recorded_baselines_dir()
+            if recorded is not None:
+                # Honour the run's recorded choice even if the directory
+                # does not exist on disk yet. The original baseline subprocess
+                # may have been killed before it created `baselines/<family>/`,
+                # but the user's intent is unchanged — and falling back to
+                # the sidebar toggle here would silently switch the baseline
+                # source. The baseline subprocess will mkdir as needed on
+                # the next pipeline pass.
+                self.baselines_dir = recorded
+                self.using_canonical_baselines = recorded.resolve() == canonical_path.resolve()
+            else:
+                # Metadata didn't record a baselines_dir at all (very old run).
+                # Fall back to the current canonical/fresh logic so the resume
+                # doesn't hard-fail.
+                canonical = canonical_baselines_path(family) if use_canonical_baselines else None
+                self.using_canonical_baselines = canonical is not None
+                self.baselines_dir = canonical if canonical is not None else fresh_baselines_dir
+        else:
+            canonical = canonical_baselines_path(family) if use_canonical_baselines else None
+            self.using_canonical_baselines = canonical is not None
+            self.baselines_dir = canonical if canonical is not None else fresh_baselines_dir
         self.log_path = self._tempdir / "pipeline.log"
         if not self.is_resume:
             self._write_run_metadata("app/streamlit_app.py")
         else:
-            # Extend any existing working / judgement CSVs to target_n,
-            # then update run_metadata so future resumes see the new n.
+            # Extend any working CSVs that already exist; the pipeline
+            # itself will create the missing ones with the new n_cases.
             self.extension_report = extend_run_to_n_cases(
                 self.exp_dir, family, self.n_cases
             )
-            if any(v > 0 for v in self.extension_report.values()):
-                self._update_run_metadata_for_extension()
+            # Always sync metadata to the requested n on resume — even when
+            # no rows were physically appended (e.g. a prior run crashed
+            # before its data0.csv files were created, so there was nothing
+            # to extend yet but the user's intent is still to run at the
+            # new n). Without this, the next "Resume / extend" slider's
+            # `prior_n` would be stale.
+            self._update_run_metadata_for_extension()
 
         self._lock = threading.Lock()
         self._phase = Phase.PENDING
@@ -335,10 +414,29 @@ class DebateRun:
 
     # ---------------------------------------------------------------- lifecycle
 
+    def _read_recorded_baselines_dir(self) -> Optional[Path]:
+        """Return the `baselines_dir` recorded in this exp dir's metadata,
+        or None if absent. Used on resume so the runner honours the
+        run's original baseline source instead of silently picking up
+        whatever the sidebar toggle currently says.
+        """
+        family_meta = self.family_dir / "run_metadata.json"
+        if not family_meta.exists():
+            return None
+        try:
+            doc = json.loads(family_meta.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        recorded = doc.get("baselines_dir")
+        return Path(recorded) if recorded else None
+
     def _update_run_metadata_for_extension(self) -> None:
         """Bump n_cases + last_updated_at_utc in run_metadata.json after
         extending a previous run. Preserves the original creation time
-        and any pre-existing fields the writer didn't know about.
+        and any pre-existing fields the writer didn't know about. Also
+        backfills `baselines_dir` and `using_canonical_baselines` if
+        absent, so very old metadata gains the explicit fields once
+        touched.
         """
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         family_meta = self.family_dir / "run_metadata.json"
@@ -349,6 +447,10 @@ class DebateRun:
                 doc = {}
             doc["n_cases"] = self.n_cases
             doc["last_updated_at_utc"] = now
+            doc.setdefault("baselines_dir", str(self.baselines_dir))
+            doc.setdefault(
+                "using_canonical_baselines", bool(self.using_canonical_baselines)
+            )
             family_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
         root_meta = self.exp_dir / "run_metadata.json"
@@ -362,6 +464,10 @@ class DebateRun:
             f = families.setdefault(self.family, {})
             f["n_cases"] = self.n_cases
             f["last_updated_at_utc"] = now
+            f.setdefault("baselines_dir", str(self.baselines_dir))
+            f.setdefault(
+                "using_canonical_baselines", bool(self.using_canonical_baselines)
+            )
             root_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
     def _write_run_metadata(self, entrypoint: str) -> None:
@@ -376,6 +482,7 @@ class DebateRun:
             "entrypoint": entrypoint,
             "family_dir": str(self.family_dir),
             "baselines_dir": str(self.baselines_dir),
+            "using_canonical_baselines": bool(self.using_canonical_baselines),
             "recorded_at_utc": recorded_at,
         }
         self.family_dir.mkdir(parents=True, exist_ok=True)
@@ -641,33 +748,42 @@ class DebateRun:
             )
 
             # ---- Baselines (blind + oracle) ---------------------------------
-            self._set_phase(Phase.BASELINES, "Running blind + oracle baselines.")
-            for arm in ("medical_blind", "medical_oracle"):
-                for stage in ("core.debate", "core.judge", "core.scoring.accuracy"):
-                    if self._stop_check():
-                        self._finalise(Phase.STOPPED, "Stopped by user.")
-                        return
-                    # core.debate needs BoN-aware thread count; judge/scoring don't.
-                    stage_threads = debate_threads_arg if stage == "core.debate" else judge_threads_arg
-                    cmd = [
-                        py,
-                        "-m",
-                        stage,
-                        f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
-                        f"+experiment={arm}",
-                        limit_arg,
-                        stage_threads,
-                        f"++judge.language_model.model={weaker}",
-                        f"++judge_name={weaker}",
-                    ]
-                    rc = self._run_stage(f"{arm}:{stage}", cmd)
-                    outcome = self._stage_outcome(f"{arm}:{stage}", rc)
-                    if outcome == "stopped":
-                        self._finalise(Phase.STOPPED, "Stopped by user.")
-                        return
-                    if outcome is not None:
-                        self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
-                        return
+            if self.using_canonical_baselines:
+                self._set_phase(
+                    Phase.BASELINES,
+                    f"Using canonical baselines at {self.baselines_dir.relative_to(REPO_ROOT)} (no API spend).",
+                )
+                self._append_log(
+                    f"[runner] skipping baseline stage; aggregator will read from {self.baselines_dir}"
+                )
+            else:
+                self._set_phase(Phase.BASELINES, "Running blind + oracle baselines (fresh).")
+                for arm in ("medical_blind", "medical_oracle"):
+                    for stage in ("core.debate", "core.judge", "core.scoring.accuracy"):
+                        if self._stop_check():
+                            self._finalise(Phase.STOPPED, "Stopped by user.")
+                            return
+                        # core.debate needs BoN-aware thread count; judge/scoring don't.
+                        stage_threads = debate_threads_arg if stage == "core.debate" else judge_threads_arg
+                        cmd = [
+                            py,
+                            "-m",
+                            stage,
+                            f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
+                            f"+experiment={arm}",
+                            limit_arg,
+                            stage_threads,
+                            f"++judge.language_model.model={weaker}",
+                            f"++judge_name={weaker}",
+                        ]
+                        rc = self._run_stage(f"{arm}:{stage}", cmd)
+                        outcome = self._stage_outcome(f"{arm}:{stage}", rc)
+                        if outcome == "stopped":
+                            self._finalise(Phase.STOPPED, "Stopped by user.")
+                            return
+                        if outcome is not None:
+                            self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
+                            return
 
             # ---- Debate generation -----------------------------------------
             self._set_phase(Phase.DEBATE, f"Generating debate transcripts ({n} cases).")

@@ -1,0 +1,5 @@
+method,accuracy,accuracy_N,dataset,model,swap,n_votes,unknown_proportion,num_matches,method_type,debate_type,consultant_type,use_intermediary,seed,exp_suffix
+baseline_blind,0.6,0.6185567010309279,medical,claude-sonnet-4-6,False,1,0.0,100,baseline,,,False,0,
+baseline_blind,0.67,0.6701030927835051,medical,claude-sonnet-4-6,True,1,0.0,100,baseline,,,False,0,
+baseline_oracle,0.89,0.8865979381443299,medical,claude-sonnet-4-6,False,1,0.0,100,baseline,,,False,0,
+baseline_oracle,0.93,0.9278350515463918,medical,claude-sonnet-4-6,True,1,0.0,100,baseline,,,False,0,

@@ -25,6 +25,7 @@ from app.runner import (
     DebateRun,
     FAMILY_MODELS,
     Phase,
+    canonical_baselines_path,
     estimate_cost_usd,
     find_latest_run,
     transcript_rounds,
@@ -179,6 +180,31 @@ with st.sidebar:
         )
 
     st.divider()
+    st.subheader("Baselines")
+    canonical = canonical_baselines_path(family)
+    if canonical is not None:
+        st.caption(
+            f"Canonical baselines for **{family}** are committed at "
+            f"`{canonical.relative_to(Path.cwd())}` (100 cases, fixed "
+            f"reference for PGR). By default the debate run skips the "
+            f"baseline-API stage and reuses these numbers."
+        )
+        recompute_baselines = st.toggle(
+            "Recompute baselines (don't use canonical)",
+            value=False,
+            help="Turn on to re-run blind + oracle baselines from scratch "
+                 "alongside the debate run. Useful if you've changed the judge "
+                 "model or judge prompts. Adds a small amount of cost (~$0.15 "
+                 "per 100 cases for the OpenAI weaker judge).",
+        )
+    else:
+        st.caption(
+            f"No canonical baselines committed for **{family}** yet. "
+            f"This run will compute them fresh."
+        )
+        recompute_baselines = True
+
+    st.divider()
     st.subheader("API keys (session only)")
     openai_key = st.text_input(
         "OpenAI key",
@@ -248,6 +274,20 @@ with st.sidebar:
             f"({latest['family']}, current n={prior_n}). "
             f"Recorded {latest.get('recorded_at_utc', 'unknown')}."
         )
+        # Surface the run's original baseline source so users know that
+        # the "Recompute baselines" toggle above does NOT apply on
+        # resume — the original choice is preserved to keep PGR
+        # denominators consistent across the run's lifetime.
+        if latest.get("baselines_dir"):
+            source_label = (
+                "canonical (committed reference)"
+                if latest.get("using_canonical_baselines")
+                else f"per-run at `{Path(latest['baselines_dir']).relative_to(Path.cwd())}`"
+            )
+            st.caption(
+                f"This run's baseline source is fixed at **{source_label}**. "
+                f"The Recompute toggle above only affects fresh Run clicks."
+            )
 
         resume_target_n = st.slider(
             "Total cases after this run",
@@ -329,6 +369,7 @@ if start_clicked:
                 n_cases=n_cases,
                 openai_key=openai_key.strip(),
                 anthropic_key=anthropic_key.strip(),
+                use_canonical_baselines=not recompute_baselines,
             )
             new_run.start()
             st.session_state["run"] = new_run
@@ -346,6 +387,7 @@ if resume_clicked and latest is not None:
             openai_key=openai_key.strip(),
             anthropic_key=anthropic_key.strip(),
             resume_from=latest["exp_dir"],
+            use_canonical_baselines=not recompute_baselines,
         )
         # Surface the extension report so the user sees what got grown.
         if new_run.extension_report:

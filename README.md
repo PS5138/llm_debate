@@ -2,7 +2,7 @@
 
 **Can AI debate help a weaker judge choose the right medical diagnosis?**
 
-![Live debate viewer](assets/streamlit-demo-final.png)
+![Live debate viewer](assets/debate_pic.png)
 
 ## Introduction
 
@@ -186,7 +186,14 @@ The pipeline has three important persistence points:
 ### Baseline Runs
 
 Baselines are run before debate so that analysis can compare debate against a
-blind floor and oracle ceiling.
+blind floor and oracle ceiling. They are conceptually fixed reference
+constants once `(judge_model, judge_prompt, dataset)` are pinned, so the
+canonical numbers live under `data/canonical_baselines/<family>/` and are
+re-used across debate runs rather than recomputed each time. The Streamlit
+frontend reads from this folder by default; flip the "Recompute baselines"
+toggle in the sidebar to force a fresh per-run baseline pass. See
+[`data/canonical_baselines/README.md`](data/canonical_baselines/README.md)
+for the regeneration command and when to use it.
 
 The baseline runner creates:
 

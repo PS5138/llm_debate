@@ -1,0 +1,5 @@
+method,accuracy,accuracy_N,dataset,model,swap,n_votes,unknown_proportion,num_matches,method_type,debate_type,consultant_type,use_intermediary,seed,exp_suffix
+baseline_blind,0.54,0.5567010309278351,medical,gpt-5.4-mini,False,1,0.0,100,baseline,,,False,0,
+baseline_blind,0.67,0.6804123711340206,medical,gpt-5.4-mini,True,1,0.0,100,baseline,,,False,0,
+baseline_oracle,0.86,0.8556701030927835,medical,gpt-5.4-mini,False,1,0.0,100,baseline,,,False,0,
+baseline_oracle,0.82,0.8144329896907216,medical,gpt-5.4-mini,True,1,0.0,100,baseline,,,False,0,
