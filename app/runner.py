@@ -887,7 +887,13 @@ class DebateRun:
                 return
             rc = self._run_stage(
                 "analysis",
-                [py, "scripts/analyze_medical_debate.py", str(self.family_dir)],
+                [
+                    py,
+                    "scripts/analyze_medical_debate.py",
+                    str(self.family_dir),
+                    "--baselines-dir",
+                    str(self.baselines_dir),
+                ],
             )
             outcome = self._stage_outcome("analysis", rc)
             if outcome == "stopped":

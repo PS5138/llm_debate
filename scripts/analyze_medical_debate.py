@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Use the same normalisation rule as the judge so the verification rate
 # reported here matches what the judge actually trusted in the transcript.
 # Importing core/transcript_parser keeps the two sides in lockstep.
+from core.scoring.accuracy import find_answer
 from core.transcript_parser import TranscriptParser
 
 
@@ -357,7 +358,173 @@ def write_summary(out_dir: Path, name: str, lines: list[str]) -> None:
     (out_dir / f"{name}_summary.txt").write_text("\n".join(lines) + "\n")
 
 
-def main(exp_dir: Path) -> None:
+# ---------------------------------------------------------------------------
+# Position-bias analysis
+# ---------------------------------------------------------------------------
+
+# Final-judge subdirectories under <family>/debate_sim/ are named
+# `<condition>_<judge_model>`. Match against known conditions so judge
+# model strings that contain underscores (e.g. `gpt-5.4-mini`) split cleanly.
+_KNOWN_DEBATE_CONDITIONS = (
+    "e1_info_asymmetry",
+    "e2_double_asymmetry",
+    "e3_capability_asymmetry",
+    "e4_full_symmetry",
+)
+
+
+def _split_condition_dir(name: str) -> Optional[tuple[str, str]]:
+    for cond in _KNOWN_DEBATE_CONDITIONS:
+        prefix = cond + "_"
+        if name.startswith(prefix):
+            judge = name[len(prefix):]
+            if judge:
+                return cond, judge
+    return None
+
+
+def _judge_letter(text: str) -> str:
+    """Return 'A', 'B', or '?' using the project's own answer parser."""
+    if not isinstance(text, str) or not text.strip():
+        return "?"
+    a = find_answer(text, "A")
+    b = find_answer(text, "B")
+    if a and not b:
+        return "A"
+    if b and not a:
+        return "B"
+    return "?"
+
+
+def _bias_counts_for_pair(orig_csv: Path, swap_csv: Path) -> dict:
+    """Read original + swap judgement CSVs and return the (orig, swap) tally.
+
+    Returns a dict with `n`, `correct`, `wrong`, `a_bias`, `b_bias`,
+    `unparseable`, plus the matching `_pct` values rounded to one decimal.
+    """
+    out = {"n": 0, "correct": 0, "wrong": 0, "a_bias": 0, "b_bias": 0, "unparseable": 0}
+    if not orig_csv.exists() or not swap_csv.exists():
+        return out
+    orig = pd.read_csv(orig_csv, keep_default_na=False)
+    swap = pd.read_csv(swap_csv, keep_default_na=False)
+    n = min(len(orig), len(swap))
+    out["n"] = n
+    for i in range(n):
+        o = _judge_letter(orig.iloc[i].get("answer_judge", ""))
+        s = _judge_letter(swap.iloc[i].get("answer_judge", ""))
+        if (o, s) == ("A", "B"):
+            out["correct"] += 1
+        elif (o, s) == ("B", "A"):
+            out["wrong"] += 1
+        elif (o, s) == ("A", "A"):
+            out["a_bias"] += 1
+        elif (o, s) == ("B", "B"):
+            out["b_bias"] += 1
+        else:
+            out["unparseable"] += 1
+    return out
+
+
+def position_bias_rows(family_dir: Path, baselines_dir: Optional[Path]) -> list[dict]:
+    """Walk the debate-stage judgement dirs (and optionally the baselines)
+    and return one row per (arm, judge_model).
+
+    Concession judging is excluded — it isn't an A/B-pick stage. Anthropic
+    and OpenAI runs both fall out naturally because the judge_model
+    portion of each subdirectory name is whatever the runner injected
+    (e.g. `gpt-5.5`, `gpt-5.4-mini`, `claude-opus-4-6`, `claude-sonnet-4-6`).
+    """
+    rows: list[dict] = []
+
+    debate_root = family_dir / "debate_sim"
+    if debate_root.exists():
+        for sub in sorted(debate_root.iterdir()):
+            if not sub.is_dir() or sub.name.startswith("concession_"):
+                continue
+            parsed = _split_condition_dir(sub.name)
+            if parsed is None:
+                continue
+            arm, judge = parsed
+            counts = _bias_counts_for_pair(
+                sub / "data0_judgement.csv",
+                sub / "data0_swap_judgement.csv",
+            )
+            if counts["n"] == 0:
+                continue
+            rows.append({"stage": "debate", "arm": arm, "judge_model": judge, **counts})
+
+    if baselines_dir is not None and baselines_dir.exists():
+        for arm in ("baseline_blind", "baseline_oracle"):
+            arm_dir = baselines_dir / arm
+            if not arm_dir.exists():
+                continue
+            for judge_dir in sorted(arm_dir.iterdir()):
+                if not judge_dir.is_dir():
+                    continue
+                counts = _bias_counts_for_pair(
+                    judge_dir / "data0_judgement.csv",
+                    judge_dir / "data0_swap_judgement.csv",
+                )
+                if counts["n"] == 0:
+                    continue
+                short_arm = "B1" if arm == "baseline_blind" else "B2"
+                rows.append(
+                    {"stage": "baseline", "arm": short_arm, "judge_model": judge_dir.name, **counts}
+                )
+
+    # Add percentage columns so the CSV is human-readable without further math.
+    for r in rows:
+        n = r["n"] or 1
+        for k in ("correct", "wrong", "a_bias", "b_bias", "unparseable"):
+            r[f"{k}_pct"] = round(100 * r[k] / n, 1)
+        r["pos_bias_total"] = r["a_bias"] + r["b_bias"]
+        r["pos_bias_total_pct"] = round(100 * r["pos_bias_total"] / n, 1)
+        r["swap_averaged_accuracy"] = round((r["correct"] + 0.5 * r["pos_bias_total"]) / n, 3)
+    return rows
+
+
+def plot_position_bias(rows: list[dict], family_label: str, out_path: Path) -> None:
+    """Stacked bar chart of per-arm position-bias rates, separating A-bias
+    and B-bias so direction (primacy vs recency) is visible."""
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    # Plot order: baselines first (B1, B2), then E1..E4
+    arm_order = ["B1", "B2"] + list(_KNOWN_DEBATE_CONDITIONS)
+    arm_labels = {
+        "B1": "B1\nblind", "B2": "B2\noracle",
+        "e1_info_asymmetry": "E1\ninfo asym",
+        "e2_double_asymmetry": "E2\ndouble asym",
+        "e3_capability_asymmetry": "E3\ncap asym",
+        "e4_full_symmetry": "E4\nsymmetry",
+    }
+    df = df[df["arm"].isin(arm_order)].copy()
+    df["__order"] = df["arm"].map({a: i for i, a in enumerate(arm_order)})
+    df = df.sort_values("__order")
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    xs = np.arange(len(df))
+    ax.bar(xs, df["a_bias_pct"], color="#4C78A8", label="A-bias")
+    ax.bar(xs, df["b_bias_pct"], bottom=df["a_bias_pct"], color="#F58518", label="B-bias")
+    for i, (_, row) in enumerate(df.iterrows()):
+        total = row["pos_bias_total_pct"]
+        ax.text(i, total + 0.5, f"{total:.0f}%", ha="center", va="bottom", fontsize=9)
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels([arm_labels.get(a, a) for a in df["arm"]], fontsize=9)
+    ax.set_ylabel("Position-biased cases (%)")
+    ax.set_ylim(0, max(35, df["pos_bias_total_pct"].max() + 5))
+    ax.set_title(f"Position bias per arm · {family_label}")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(axis="y", alpha=0.25)
+    ax.legend(frameon=False, loc="upper right")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def main(exp_dir: Path, baselines_dir: Optional[Path] = None) -> None:
     debate_csv = exp_dir / "debate_sim" / "data0.csv"
     if not debate_csv.exists():
         raise SystemExit(f"missing transcript CSV: {debate_csv}")
@@ -496,11 +663,67 @@ def main(exp_dir: Path) -> None:
     )
     plot_debate_outcomes(outcomes, family_label, plots_dir / "07_debate_outcomes.png")
 
+    # 5. Position bias ------------------------------------------------------
+    pb_rows = position_bias_rows(exp_dir, baselines_dir)
+    if pb_rows:
+        pb_df = pd.DataFrame(pb_rows)
+        pb_df.to_csv(out_dir / "position_bias.csv", index=False)
+
+        # Pretty per-arm table for the summary file.
+        display_cols = [
+            "stage", "arm", "judge_model", "n",
+            "correct", "wrong", "a_bias", "b_bias",
+            "pos_bias_total_pct", "swap_averaged_accuracy",
+        ]
+        pretty = pb_df[display_cols].to_string(index=False)
+
+        baselines_note = (
+            f"Baselines scanned from: {baselines_dir}"
+            if baselines_dir is not None
+            else "Baselines not scanned (no --baselines-dir supplied)."
+        )
+        write_summary(
+            out_dir,
+            "position_bias",
+            [
+                "Position bias — per-arm tally of (orig_pick, swap_pick) pairs.",
+                "",
+                "Every case is judged twice: once in original A/B order (A = correct",
+                "diagnosis) and once in swapped order (B = correct). The four",
+                "outcomes per case are:",
+                "  (A,B) → judge picked the correct diagnosis in both orderings",
+                "  (B,A) → judge picked the distractor in both orderings (real",
+                "          reasoning failure, scored 0.0)",
+                "  (A,A) → judge always picked A regardless of which diagnosis is",
+                "          there (A-position bias, scored 0.5 by swap-averaging)",
+                "  (B,B) → judge always picked B regardless (B-position bias, 0.5)",
+                "",
+                "The swap-averaging in the headline accuracy already absorbs the",
+                "biased cases as 0.5 each, but this table exposes how much of the",
+                "remaining error budget is genuine reasoning vs. positional",
+                "preference. Higher pos_bias_total_pct = weaker reasoning signal",
+                "from this judge in this arm.",
+                "",
+                baselines_note,
+                "",
+                pretty,
+            ],
+        )
+        plot_position_bias(pb_rows, family_label, plots_dir / "08_position_bias.png")
+
     print(f"wrote analysis to {out_dir}/")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("exp_dir", type=Path)
+    parser.add_argument(
+        "--baselines-dir",
+        type=Path,
+        default=None,
+        help="Optional baselines directory (canonical or per-run) to include "
+             "in the position-bias breakdown so B1/B2 rates appear alongside "
+             "E1-E4. Without this only debate-stage arms are reported.",
+    )
     args = parser.parse_args()
-    main(args.exp_dir)
+    main(args.exp_dir, baselines_dir=args.baselines_dir)
