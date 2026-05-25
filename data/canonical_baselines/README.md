@@ -9,23 +9,33 @@ QuALITY too.
 
 ## Layout
 
+A fully-populated canonical folder carries **both the weaker and frontier
+judge baselines** so every debate arm has a same-judge floor and ceiling for
+PGR computation. E2/E3 use the weaker judge; E1/E4 use the frontier judge.
+
 ```
 data/canonical_baselines/<family>/
   baseline_blind/
-    data0.csv                                  # working schema, not used downstream
-    <judge>/data0_judgement.csv               # judged in original A/B order
-    <judge>/data0_swap_judgement.csv          # judged in swapped A/B order
+    data0.csv                                # working schema, not used downstream
+    <weaker_judge>/data0_judgement.csv      # judged in original A/B order
+    <weaker_judge>/data0_swap_judgement.csv # judged in swapped A/B order
+    <frontier_judge>/data0_judgement.csv    # same pattern, frontier judge
+    <frontier_judge>/data0_swap_judgement.csv
   baseline_oracle/
     ... same shape ...
-  results.csv                                  # per-arm accuracy summary
-  plots/01_blind_vs_oracle.png
-  plots/02_position_bias.png
+  results.csv                                # per-(arm, swap, judge) accuracy summary
+  plots/<weaker_judge>/01_blind_vs_oracle.png
+  plots/<weaker_judge>/02_position_bias.png
+  plots/<frontier_judge>/01_blind_vs_oracle.png
+  plots/<frontier_judge>/02_position_bias.png
 ```
 
-The aggregator (`scripts/aggregate_medical_results.py`) reads the
-`<judge>/data0[_swap]_judgement.csv` files. The Streamlit frontend reads from
-this directory by default; you can flip "Recompute baselines" in the sidebar
-to force a fresh per-run baseline pass.
+The aggregator (`scripts/aggregate_medical_results.py`) walks every judge
+subdirectory under `baseline_blind/` and `baseline_oracle/`, so PGR is
+computed for any debate arm whose judge has a matching baseline here. The
+Streamlit frontend reads from this directory by default; flip "Recompute
+baselines" in the sidebar to force a fresh per-run baseline pass for both
+judges.
 
 ## When to regenerate
 
@@ -43,23 +53,31 @@ baselines are still valid.
 
 ## How to regenerate
 
-For OpenAI (the headline weaker judge is `gpt-5.4-mini`):
+Both judges in one go (the default):
 
 ```bash
+# OpenAI — runs gpt-5.4-mini AND gpt-5.5 baselines
 ./scripts/run_medical_baselines.sh 100 data/canonical_baselines/openai openai
-```
 
-For Anthropic (weaker judge is `claude-sonnet-4-6`):
-
-```bash
+# Anthropic — runs claude-sonnet-4-6 AND claude-opus-4-6 baselines
 ./scripts/run_medical_baselines.sh 100 data/canonical_baselines/anthropic anthropic
 ```
 
-Either command runs blind + oracle across all 100 DDXPlus pilot cases, in
-both original and swapped A/B orderings, and emits the two `plots/*.png`
-files automatically via `scripts/plot_baselines.py`. Cost is small (~$0.15
-for the OpenAI family; broadly similar for Anthropic since Sonnet 4.6 has
-no adaptive-thinking overhead at judge time).
+Just one judge (e.g. to add the frontier baselines without re-spending on
+the weaker ones):
+
+```bash
+./scripts/run_medical_baselines.sh 100 data/canonical_baselines/openai openai gpt-5.5
+./scripts/run_medical_baselines.sh 100 data/canonical_baselines/anthropic anthropic claude-opus-4-6
+```
+
+Each invocation runs blind + oracle across the 100 DDXPlus pilot cases for
+each listed judge, in both original and swapped A/B orderings, and emits a
+per-judge `plots/<judge>/*.png` set automatically via
+`scripts/plot_baselines.py`. Rough cost per family at n=100: weaker judge
+is ~$0.15; the frontier baseline is the dominant spend (~$1–2 for OpenAI
+`gpt-5.5`; multiples of that for Anthropic `claude-opus-4-6` because
+oracle calls carry the full patient evidence).
 
 After regenerating, commit the new canonical baselines and note which
 configuration they reflect so downstream comparisons stay honest.

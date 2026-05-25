@@ -193,9 +193,12 @@ with st.sidebar:
             "Recompute baselines (don't use canonical)",
             value=False,
             help="Turn on to re-run blind + oracle baselines from scratch "
-                 "alongside the debate run. Useful if you've changed the judge "
-                 "model or judge prompts. Adds a small amount of cost (~$0.15 "
-                 "per 100 cases for the OpenAI weaker judge).",
+                 "alongside the debate run, for BOTH the weaker and frontier "
+                 "judges (so every debate arm has a same-judge baseline for "
+                 "PGR). Useful if you've changed a judge model or prompt. "
+                 "Adds meaningful cost — for OpenAI ~$0.15 (weaker) plus "
+                 "~$1–2 (frontier) per 100 cases; for Anthropic the "
+                 "frontier baseline is the dominant spend.",
         )
     else:
         st.caption(

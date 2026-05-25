@@ -39,16 +39,14 @@ def _load_results(results_csv: Path) -> pd.DataFrame:
         raise ValueError(f"{results_csv} is missing columns: {sorted(missing)}")
     df["swap"] = df["swap"].astype(str).str.lower().map({"true": True, "false": False})
     df = df[df["method"].isin(ARM_ORDER)].copy()
-    # `core.scoring.accuracy` appends a row per invocation, so a `results.csv`
-    # from a run that has been extended N times carries 4*N duplicate rows
-    # (one per arm × swap, per extension). Two consequences if we don't
-    # deduplicate: (1) `reindex(ARM_ORDER)` in plot_position_bias crashes
-    # because the index has duplicates, and (2) `_swap_averaged` averages
-    # every historical snapshot instead of the latest n. Keep only the
-    # latest row per (method, swap), sorted by `num_matches` so the row
-    # with the most cases wins.
-    df = df.sort_values(["method", "swap", "num_matches"], kind="stable")
-    df = df.drop_duplicates(subset=["method", "swap"], keep="last").reset_index(drop=True)
+    # `core.scoring.accuracy` appends a row per invocation. A canonical
+    # baselines folder that has been (re)built across both weaker and
+    # frontier judges and through several extensions therefore carries
+    # 4 (arm × swap) × N_extensions × M_judges rows. Keep only the
+    # latest row per (method, swap, model) so each judge has exactly
+    # 4 rows and `reindex(ARM_ORDER)` per-judge plots succeed.
+    df = df.sort_values(["method", "swap", "model", "num_matches"], kind="stable")
+    df = df.drop_duplicates(subset=["method", "swap", "model"], keep="last").reset_index(drop=True)
     return df
 
 
@@ -155,11 +153,16 @@ def main(baselines_dir: Path) -> int:
     if df.empty:
         print(f"no baseline rows in {results_csv}", file=sys.stderr)
         return 1
-    judge_model = str(df["model"].iloc[0])
-    plots_dir = baselines_dir / "plots"
-    plot_blind_vs_oracle(df, plots_dir / "01_blind_vs_oracle.png", judge_model)
-    plot_position_bias(df, plots_dir / "02_position_bias.png", judge_model)
-    print(f"wrote {plots_dir}/01_blind_vs_oracle.png and 02_position_bias.png")
+    # Emit one set of plots per judge model present in results.csv. A
+    # canonical baselines folder may carry both the weaker and frontier
+    # judges; both deserve their own blind-vs-oracle bar chart.
+    plots_root = baselines_dir / "plots"
+    for judge_model, sub in df.groupby("model"):
+        judge_str = str(judge_model)
+        out_dir = plots_root / judge_str
+        plot_blind_vs_oracle(sub, out_dir / "01_blind_vs_oracle.png", judge_str)
+        plot_position_bias(sub, out_dir / "02_position_bias.png", judge_str)
+        print(f"wrote {out_dir}/01_blind_vs_oracle.png and 02_position_bias.png")
     return 0
 
 

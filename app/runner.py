@@ -757,33 +757,62 @@ class DebateRun:
                     f"[runner] skipping baseline stage; aggregator will read from {self.baselines_dir}"
                 )
             else:
-                self._set_phase(Phase.BASELINES, "Running blind + oracle baselines (fresh).")
+                self._set_phase(
+                    Phase.BASELINES,
+                    "Running blind + oracle baselines (fresh) for both weaker and frontier judges.",
+                )
+                # Run both weaker AND frontier judges so PGR can be computed
+                # for every debate arm (E1/E4 use the frontier judge; E2/E3
+                # use the weaker judge). core.debate writes data0.csv once
+                # per arm and doesn't depend on the judge model — run it
+                # against the first judge to satisfy Hydra's required
+                # config, then loop core.judge + core.scoring.accuracy over
+                # both models.
+                baseline_judges = [weaker, frontier]
                 for arm in ("medical_blind", "medical_oracle"):
-                    for stage in ("core.debate", "core.judge", "core.scoring.accuracy"):
-                        if self._stop_check():
-                            self._finalise(Phase.STOPPED, "Stopped by user.")
-                            return
-                        # core.debate needs BoN-aware thread count; judge/scoring don't.
-                        stage_threads = debate_threads_arg if stage == "core.debate" else judge_threads_arg
-                        cmd = [
-                            py,
-                            "-m",
-                            stage,
-                            f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
-                            f"+experiment={arm}",
-                            limit_arg,
-                            stage_threads,
-                            f"++judge.language_model.model={weaker}",
-                            f"++judge_name={weaker}",
-                        ]
-                        rc = self._run_stage(f"{arm}:{stage}", cmd)
-                        outcome = self._stage_outcome(f"{arm}:{stage}", rc)
-                        if outcome == "stopped":
-                            self._finalise(Phase.STOPPED, "Stopped by user.")
-                            return
-                        if outcome is not None:
-                            self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
-                            return
+                    if self._stop_check():
+                        self._finalise(Phase.STOPPED, "Stopped by user.")
+                        return
+                    debate_cmd = [
+                        py, "-m", "core.debate",
+                        f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
+                        f"+experiment={arm}",
+                        limit_arg,
+                        debate_threads_arg,
+                        f"++judge.language_model.model={baseline_judges[0]}",
+                        f"++judge_name={baseline_judges[0]}",
+                    ]
+                    rc = self._run_stage(f"{arm}:core.debate", debate_cmd)
+                    outcome = self._stage_outcome(f"{arm}:core.debate", rc)
+                    if outcome == "stopped":
+                        self._finalise(Phase.STOPPED, "Stopped by user.")
+                        return
+                    if outcome is not None:
+                        self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
+                        return
+
+                    for judge_model in baseline_judges:
+                        for stage in ("core.judge", "core.scoring.accuracy"):
+                            if self._stop_check():
+                                self._finalise(Phase.STOPPED, "Stopped by user.")
+                                return
+                            cmd = [
+                                py, "-m", stage,
+                                f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
+                                f"+experiment={arm}",
+                                limit_arg,
+                                judge_threads_arg,
+                                f"++judge.language_model.model={judge_model}",
+                                f"++judge_name={judge_model}",
+                            ]
+                            rc = self._run_stage(f"{arm}:{stage}:{judge_model}", cmd)
+                            outcome = self._stage_outcome(f"{arm}:{stage}:{judge_model}", rc)
+                            if outcome == "stopped":
+                                self._finalise(Phase.STOPPED, "Stopped by user.")
+                                return
+                            if outcome is not None:
+                                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
+                                return
 
             # ---- Debate generation -----------------------------------------
             self._set_phase(Phase.DEBATE, f"Generating debate transcripts ({n} cases).")
