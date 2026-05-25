@@ -67,9 +67,14 @@ The baselines define the floor and ceiling for **Performance Gap Recovered**:
 PGR = (debate_accuracy - blind_accuracy) / (oracle_accuracy - blind_accuracy)
 ```
 
+Baselines and the debate arm use the **same judge model** in numerator and
+denominator (Khan et al. convention): E2/E3 are anchored to weaker-judge
+baselines, E1/E4 to frontier-judge baselines. Canonical baselines are
+committed for both judges, per family.
+
 ### Model families
 
-| Family | Frontier debaters / frontier judge | Weaker judge and baselines |
+| Family | Frontier debaters / frontier judge | Weaker judge |
 |---|---|---|
 | OpenAI | `gpt-5.5` | `gpt-5.4-mini` |
 | Anthropic | `claude-opus-4-6` | `claude-sonnet-4-6` |
@@ -116,9 +121,11 @@ flowchart TD
 
 Baselines are conceptually fixed reference constants once
 `(judge_model, judge_prompt, dataset)` are pinned. Canonical 100-case
-baselines for both families are committed at `data/canonical_baselines/`
-and re-used across debate runs by default; flip "Recompute baselines" in
-the Streamlit sidebar to force a fresh per-run pass.
+baselines for both families — covering **both the weaker and frontier
+judges** so every debate arm has a same-judge floor and ceiling — are
+committed at `data/canonical_baselines/` and re-used across debate runs by
+default; flip "Recompute baselines" in the Streamlit sidebar to force a
+fresh per-run pass over both judges.
 
 ### Debate generation
 

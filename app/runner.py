@@ -34,37 +34,53 @@ PILOT_CSV = REPO_ROOT / "data" / "ddxplus" / "ddxplus_debate_pilot_100.csv"
 CANONICAL_BASELINES_ROOT = REPO_ROOT / "data" / "canonical_baselines"
 
 
-def canonical_baselines_path(family: str) -> Optional[Path]:
-    """Return the committed canonical baselines dir for a family if it has
-    been *fully* populated, else None.
-
-    Required layout:
-      <family>/results.csv
-      <family>/baseline_blind/<judge>/data0_judgement.csv
-      <family>/baseline_blind/<judge>/data0_swap_judgement.csv
-      <family>/baseline_oracle/<judge>/data0_judgement.csv
-      <family>/baseline_oracle/<judge>/data0_swap_judgement.csv
-
-    A partial folder (e.g. blind but no oracle, or no swap variants) would
-    silently produce NaN baselines / PGR in the aggregator, so we require
-    all four judgement CSVs before honouring the folder as canonical.
-    """
-    path = CANONICAL_BASELINES_ROOT / family
-    if not (path / "results.csv").exists():
-        return None
-    for arm in ("baseline_blind", "baseline_oracle"):
-        arm_dir = path / arm
-        if not arm_dir.exists():
-            return None
-        for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
-            if not any(arm_dir.rglob(fname)):
-                return None
-    return path
-
 FAMILY_MODELS = {
     "openai": {"frontier": "gpt-5.5", "weaker": "gpt-5.4-mini"},
     "anthropic": {"frontier": "claude-opus-4-6", "weaker": "claude-sonnet-4-6"},
 }
+
+
+def canonical_baselines_path(family: str) -> Optional[Path]:
+    """Return the committed canonical baselines dir for a family if it has
+    been *fully* populated for BOTH the weaker and frontier judges, else None.
+
+    Required layout (per judge role for this family):
+      <family>/results.csv
+      <family>/baseline_blind/<weaker>/data0_judgement.csv
+      <family>/baseline_blind/<weaker>/data0_swap_judgement.csv
+      <family>/baseline_blind/<frontier>/data0_judgement.csv
+      <family>/baseline_blind/<frontier>/data0_swap_judgement.csv
+      <family>/baseline_oracle/<weaker>/data0_judgement.csv
+      <family>/baseline_oracle/<weaker>/data0_swap_judgement.csv
+      <family>/baseline_oracle/<frontier>/data0_judgement.csv
+      <family>/baseline_oracle/<frontier>/data0_swap_judgement.csv
+
+    Same-judge PGR pairing (E1/E4 ↔ frontier baselines, E2/E3 ↔ weaker
+    baselines) means a folder missing either judge would silently produce
+    NaN PGR for half the debate arms. Requiring both judges by name forces
+    a partial regeneration to fall through to fresh recompute instead.
+
+    Caveat: this only checks for the *presence* of the CSVs. It does not
+    detect stale baselines (correct judges, but generated against an older
+    prompt or dataset). Freshness is governed by the regeneration rules in
+    `data/canonical_baselines/README.md`.
+    """
+    if family not in FAMILY_MODELS:
+        return None
+    path = CANONICAL_BASELINES_ROOT / family
+    if not (path / "results.csv").exists():
+        return None
+    required_judges = (FAMILY_MODELS[family]["weaker"], FAMILY_MODELS[family]["frontier"])
+    for arm in ("baseline_blind", "baseline_oracle"):
+        arm_dir = path / arm
+        if not arm_dir.exists():
+            return None
+        for judge in required_judges:
+            judge_dir = arm_dir / judge
+            for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
+                if not (judge_dir / fname).exists():
+                    return None
+    return path
 
 # Per-family concurrency caps, expressed as "how many cases can run in
 # parallel at a time". Anthropic stays conservative because Opus has

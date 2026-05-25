@@ -40,16 +40,24 @@ judges.
 ## When to regenerate
 
 Regenerate canonical baselines whenever the baseline-relevant configuration
-changes:
+changes. Since E1/E4 now pair against frontier-judge baselines and E2/E3
+against weaker-judge baselines, **either** judge model being swapped
+invalidates the matching slice of this folder.
 
-- The weaker judge model (`weaker` in `app.runner.FAMILY_MODELS`) is swapped.
-- The baseline prompts in `core/config/experiment/judge/baselines/medical_*.yaml`
-  are edited.
+Regenerate when:
+
+- The **weaker judge model** (`weaker` in `app.runner.FAMILY_MODELS`) is
+  swapped — invalidates the weaker-judge baselines used by E2/E3.
+- The **frontier judge model** (`frontier` in `app.runner.FAMILY_MODELS`)
+  is swapped — invalidates the frontier-judge baselines used by E1/E4.
+- The baseline prompts in
+  `core/config/experiment/judge/baselines/medical_*.yaml` are edited.
 - The DDXPlus pilot CSV (`data/ddxplus/ddxplus_debate_pilot_100.csv`) is
   rebuilt with different filtering.
 
-If only the debate setup changes (frontier model, BoN, prompts), the
-baselines are still valid.
+In contrast, if only the **debate setup** changes — frontier-debater
+prompts, BoN, rollout config, preference-judge — the baselines are still
+valid (no judging-time change for the blind/oracle judges).
 
 ## How to regenerate
 

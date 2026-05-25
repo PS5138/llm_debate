@@ -100,8 +100,8 @@ The wrapper script:
 1. Runs the local parser test unless `RUN_TESTS=0`.
 2. Checks that the prepared DDXPlus pilot exists, rebuilding it if
    needed and raw files are available.
-3. Runs blind and oracle baselines (or skips, if canonical baselines
-   are in use).
+3. Runs blind and oracle baselines for **both** the weaker and frontier
+   judges (or skips, if canonical baselines are in use).
 4. Runs debate transcript generation.
 5. Runs E1-E4 final judging.
 6. Runs concession judging with `gpt-4o-mini` by default.
@@ -132,11 +132,15 @@ RUN_ROOT="$(./scripts/create_results_dir.sh)"
 # 1. Optional: rebuild the prepared pilot from raw DDXPlus files.
 python scripts/prepare_ddxplus_debate_pilot.py
 
-# 2. Run blind and oracle baselines.
+# 2. Run blind and oracle baselines (defaults to running BOTH the weaker
+#    and frontier judges, so every debate arm has a same-judge floor and
+#    ceiling for PGR). Pass a comma-separated 4th argument to restrict.
 ./scripts/run_medical_baselines.sh \
   100 \
   "$RUN_ROOT/baselines/openai" \
   openai
+# e.g. frontier only:
+#   ./scripts/run_medical_baselines.sh 100 "$RUN_ROOT/baselines/openai" openai gpt-5.5
 
 # 3. Run debate generation, E1-E4 judging, concession checks, analysis, and export.
 ./scripts/run_medical_debate.sh \
@@ -146,7 +150,8 @@ python scripts/prepare_ddxplus_debate_pilot.py
   "$RUN_ROOT/baselines/openai"
 ```
 
-Replace `openai` with `anthropic` for the Anthropic model family.
+Replace `openai` with `anthropic` for the Anthropic model family (the
+Anthropic defaults are `claude-sonnet-4-6,claude-opus-4-6`).
 
 ## Re-run analysis without API calls
 

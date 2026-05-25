@@ -485,7 +485,12 @@ def position_bias_rows(family_dir: Path, baselines_dir: Optional[Path]) -> list[
 
 def plot_position_bias(rows: list[dict], family_label: str, out_path: Path) -> None:
     """Stacked bar chart of per-arm position-bias rates, separating A-bias
-    and B-bias so direction (primacy vs recency) is visible."""
+    and B-bias so direction (primacy vs recency) is visible.
+
+    When an arm has more than one judge in `rows` (e.g. canonical baselines
+    carry both weaker and frontier judges for B1/B2), the judge model is
+    appended to that arm's x-label so the bars are not ambiguous.
+    """
     if not rows:
         return
     df = pd.DataFrame(rows)
@@ -500,9 +505,24 @@ def plot_position_bias(rows: list[dict], family_label: str, out_path: Path) -> N
     }
     df = df[df["arm"].isin(arm_order)].copy()
     df["__order"] = df["arm"].map({a: i for i, a in enumerate(arm_order)})
-    df = df.sort_values("__order")
+    # Stable sort by (arm order, judge_model) so duplicated arms are adjacent
+    # and labels line up with bar order.
+    df = df.sort_values(["__order", "judge_model"], kind="stable").reset_index(drop=True)
 
-    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    # Disambiguate any arm with >1 judge by appending the judge model to the
+    # x-label. Single-judge arms keep their clean B1/E2/... label.
+    judge_counts = df.groupby("arm")["judge_model"].nunique()
+    xticklabels = []
+    for _, row in df.iterrows():
+        base = arm_labels.get(row["arm"], row["arm"])
+        if judge_counts.get(row["arm"], 0) > 1:
+            xticklabels.append(f"{base}\n{row['judge_model']}")
+        else:
+            xticklabels.append(base)
+
+    # A run with both judges on baselines + per-arm debate judges has up to
+    # 8 bars (B1×2, B2×2, E1, E2, E3, E4); widen the canvas a touch.
+    fig, ax = plt.subplots(figsize=(max(8.5, 1.05 * len(df)), 4.8))
     xs = np.arange(len(df))
     ax.bar(xs, df["a_bias_pct"], color="#4C78A8", label="A-bias")
     ax.bar(xs, df["b_bias_pct"], bottom=df["a_bias_pct"], color="#F58518", label="B-bias")
@@ -511,7 +531,7 @@ def plot_position_bias(rows: list[dict], family_label: str, out_path: Path) -> N
         ax.text(i, total + 0.5, f"{total:.0f}%", ha="center", va="bottom", fontsize=9)
 
     ax.set_xticks(xs)
-    ax.set_xticklabels([arm_labels.get(a, a) for a in df["arm"]], fontsize=9)
+    ax.set_xticklabels(xticklabels, fontsize=8)
     ax.set_ylabel("Position-biased cases (%)")
     ax.set_ylim(0, max(35, df["pos_bias_total_pct"].max() + 5))
     ax.set_title(f"Position bias per arm · {family_label}")

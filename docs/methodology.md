@@ -42,11 +42,13 @@ Baselines are conceptually fixed reference constants once
 under `data/canonical_baselines/<family>/` and are re-used across debate runs
 rather than recomputed each time. The frontend reads from this folder by
 default; flip "Recompute baselines" in the sidebar to force a fresh per-run
-pass. See
+pass over both judges. See
 [`data/canonical_baselines/README.md`](../data/canonical_baselines/README.md)
 for the regeneration command and when to use it.
 
-A baseline run creates:
+A baseline run creates the following, **once per judge** (canonical folders
+carry both the weaker and the frontier judge so every debate arm has a
+same-judge floor and ceiling for PGR):
 
 - `baseline_blind/data0.csv` and `baseline_oracle/data0.csv` — zero-round
   working rows for each arm.
@@ -54,12 +56,22 @@ A baseline run creates:
   — blind judgements in original and swapped A/B order.
 - `baseline_oracle/<judge>/data0_judgement.csv` and `..._swap_judgement.csv`
   — same for oracle.
-- `baselines/results.csv` — scoring summaries appended by
-  `core.scoring.accuracy`.
+- `results.csv` (sibling of the arm folders) — scoring summaries appended by
+  `core.scoring.accuracy`, one row per `(arm, swap, judge_model)`.
+- `plots/<judge>/01_blind_vs_oracle.png` and `02_position_bias.png` — one
+  set of diagnostic plots per judge, written by `scripts/plot_baselines.py`.
 
 The `data0.csv` files are not final result tables; they are cached working
 files. The judgement CSVs and aggregate outputs are what downstream analysis
 reads.
+
+### Same-judge PGR pairing
+
+`scripts/aggregate_medical_results.py` pairs each debate arm with the
+baselines for the *same* judge model: E2 and E3 (weaker judge) are anchored
+to the weaker-judge blind/oracle baselines, and E1 and E4 (frontier judge)
+are anchored to the frontier-judge blind/oracle baselines. This matches the
+Khan et al. convention and keeps the PGR denominator interpretable.
 
 ## Debate generation in detail
 
