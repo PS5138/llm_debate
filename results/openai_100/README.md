@@ -37,7 +37,35 @@ PGR = (debate_accuracy - blind_accuracy) / (oracle_accuracy - blind_accuracy)
 
 ![Accuracy by condition](plots/01_accuracy_by_condition.png)
 
+**Fig. 1. Accuracy by condition.** Each bar is the percentage of cases where
+the judge chose the correct diagnosis after swap-averaging original and
+A/B-swapped judgements. B1 is the blind baseline, where the judge sees only the
+two diagnoses and not the patient evidence. B2 is the oracle baseline, where
+the judge sees the patient evidence directly. E1-E4 are the debate conditions.
+The left panel uses the weaker judge (`gpt-5.4-mini`) for B1/B2/E2/E3; the
+right panel uses the frontier judge (`gpt-5.5`) for B1/B2/E1/E4. Higher is
+better. The main takeaway is that debate moves accuracy close to the
+same-judge oracle ceiling.
+
 ![Performance Gap Recovered](plots/02_pgr_by_condition.png)
+
+**Fig. 2. Performance Gap Recovered (PGR).** PGR asks how much of the gap
+between blind judging and oracle judging is recovered by debate. A value of
+0% would mean debate performs no better than blind judging. A value of 100%
+would mean debate reaches the oracle baseline. Values above 100% can happen in
+a finite sample when debate slightly outperforms the measured oracle baseline.
+The main takeaway is that all four OpenAI debate arms recover most or all of
+the blind-to-oracle gap.
+
+![Per-case lift](plots/03_per_case_lift.png)
+
+**Fig. 3. Per-case lift from blind judging to debate.** Each small heatmap
+compares the same cases under the blind baseline and under debate. The most
+important cell is "blind wrong / debate right": those are cases where debate
+rescued a case the blind judge missed. The "blind right / debate wrong" cell is
+the opposite: cases where debate hurt performance. This figure helps show that
+the aggregate accuracy gains are made up of concrete case-level flips, not just
+a change in overall percentages.
 
 ## Statistical Tests
 
@@ -266,7 +294,50 @@ show a clear difference.
 
 ## Bias And Quality Controls
 
+![Verbosity](analysis/plots/04_verbosity.png)
+
+**Fig. 4. Verbosity balance.** This plot checks whether one side systematically
+used more words than the other. That matters because judges can be biased
+toward longer, more detailed arguments even when those arguments are not more
+truthful. The correct and incorrect sides are closely matched here: the correct
+side averages 134.2 words per turn and the incorrect side averages 135.4 words
+per turn.
+
+![Concession rate](analysis/plots/05_concession_rate.png)
+
+**Fig. 5. Concession rate.** This plot shows how often the quality-control
+judge found that a debater conceded or argued for the opposing diagnosis. A
+high concession rate would mean the debate setup was failing because one side
+was not properly defending its assigned answer. In this run, 0/100 debates were
+flagged as conceded.
+
+![Quote verification](analysis/plots/06_quote_verification.png)
+
+**Fig. 6. Quote verification.** Debaters were asked to quote patient evidence.
+Before the final judge saw the transcript, each quote was checked
+deterministically against the patient evidence. Verified quotes matched the
+evidence; unverified quotes did not. This plot shows that quote verification
+was clean in this run: 1523/1523 correct-side quotes and 1401/1401
+incorrect-side quotes were verified.
+
+![Debate outcomes](analysis/plots/07_debate_outcomes.png)
+
+**Fig. 7. Debate outcome counts.** This plot summarizes whether generated
+debates were usable after completion and concession checks. A clean result
+means the headline accuracy is based on completed, non-conceded debates rather
+than a filtered subset. Here, all 100 debates are usable and non-conceded, with
+no incomplete or unparsed cases.
+
 ![Position bias](analysis/plots/08_position_bias.png)
+
+**Fig. 8. Position-bias breakdown.** Each case was judged twice: once with the
+correct diagnosis in position A and once with the correct diagnosis in position
+B. A judge is position-biased when it picks the same letter regardless of which
+diagnosis is there: **A bias** means it picked A in both the original and
+swapped versions, while **B bias** means it picked B both times. Swap-averaging
+already scores those cases as 0.5, but this plot shows how often order
+sensitivity appears. E2 has the main caveat: 18% of cases are position-biased,
+compared with 9% for E3, 5% for E1, and 3% for E4.
 
 The main caution is position bias in E2: 18% of E2 cases were order-sensitive
 after A/B swapping. The swap-averaged headline accuracy already scores those

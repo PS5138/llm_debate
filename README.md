@@ -187,7 +187,19 @@ diagnostics needed to evaluate the run.
 
 ![OpenAI 100-case accuracy by condition](results/openai_100/plots/01_accuracy_by_condition.png)
 
+**Fig. 1. OpenAI 100-case accuracy by condition.** B1 is blind judging with no
+patient evidence; B2 is oracle judging with the evidence shown directly. E1-E4
+are the debate conditions. Bars are swap-averaged accuracies over 100 cases,
+with weaker-judge conditions shown separately from frontier-judge conditions.
+Higher is better; debate moves close to the same-judge oracle ceiling.
+
 ![OpenAI 100-case Performance Gap Recovered](results/openai_100/plots/02_pgr_by_condition.png)
+
+**Fig. 2. Performance Gap Recovered.** PGR measures how much of the gap between
+blind and oracle judging is recovered by debate. 0% means no improvement over
+blind judging; 100% means debate reaches the same-judge oracle baseline. Values
+above 100% can occur in a finite sample when debate slightly exceeds the
+measured oracle baseline.
 
 All four debate arms substantially improve over their same-judge blind
 baselines. The paired debate-vs-blind lifts are +23.5 to +30.5 percentage
@@ -210,6 +222,14 @@ debate-vs-blind lift rather than the exact PGR ordering.
 ### Bias and quality checks
 
 ![OpenAI 100-case position-bias breakdown](results/openai_100/analysis/plots/08_position_bias.png)
+
+**Fig. 3. Position-bias breakdown.** Each case is judged twice, once with the
+correct diagnosis in position A and once in position B. Position-biased cases
+are cases where the judge follows the answer letter rather than the diagnosis:
+**A bias** means the judge picked A in both the original and swapped versions;
+**B bias** means it picked B both times. Swap-averaged scoring already
+discounts these cases to 0.5, but the plot shows where order sensitivity
+remains, especially in E2.
 
 The run passes the main quality checks: 100/100 debates were usable and
 non-conceded, quote verification was 100% on both sides, and verbosity was
