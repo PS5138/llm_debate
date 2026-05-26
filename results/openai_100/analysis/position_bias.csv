@@ -1,0 +1,9 @@
+stage,arm,judge_model,n,correct,wrong,a_bias,b_bias,unparseable,correct_pct,wrong_pct,a_bias_pct,b_bias_pct,unparseable_pct,pos_bias_total,pos_bias_total_pct,swap_averaged_accuracy
+debate,e1_info_asymmetry,gpt-5.5,100,88,7,0,5,0,88.0,7.0,0.0,5.0,0.0,5,5.0,0.905
+debate,e2_double_asymmetry,gpt-5.4-mini,100,75,7,17,1,0,75.0,7.0,17.0,1.0,0.0,18,18.0,0.84
+debate,e3_capability_asymmetry,gpt-5.4-mini,100,83,8,7,2,0,83.0,8.0,7.0,2.0,0.0,9,9.0,0.875
+debate,e4_full_symmetry,gpt-5.5,100,92,5,0,3,0,92.0,5.0,0.0,3.0,0.0,3,3.0,0.935
+baseline,B1,gpt-5.4-mini,100,50,29,4,17,0,50.0,29.0,4.0,17.0,0.0,21,21.0,0.605
+baseline,B1,gpt-5.5,100,58,32,4,6,0,58.0,32.0,4.0,6.0,0.0,10,10.0,0.63
+baseline,B2,gpt-5.4-mini,100,80,12,6,2,0,80.0,12.0,6.0,2.0,0.0,8,8.0,0.84
+baseline,B2,gpt-5.5,100,92,6,1,1,0,92.0,6.0,1.0,1.0,0.0,2,2.0,0.93

@@ -1,0 +1,14 @@
+{
+  "result_id": "openai_100",
+  "source_run": "exp/2026-05-20_19-57-54_results/openai",
+  "source_run_metadata": "exp/2026-05-20_19-57-54_results/run_metadata.json",
+  "created_or_updated_at_utc": "2026-05-26T21:41:05Z",
+  "family": "openai",
+  "n_cases": 100,
+  "frontier_model": "gpt-5.5",
+  "weaker_model": "gpt-5.4-mini",
+  "concession_model": "gpt-4o-mini",
+  "baselines": "data/canonical_baselines/openai",
+  "dataset": "data/ddxplus/ddxplus_debate_pilot_100.csv",
+  "notes": "Curated tracked result bundle. Raw logs, cache JSON, judgement transcript CSVs, and full exp/ run artifacts are intentionally excluded."
+}

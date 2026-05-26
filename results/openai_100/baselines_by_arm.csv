@@ -1,0 +1,5 @@
+family,arm,judge_model,n_cases,acc_mean,ci_lo,ci_hi
+openai,B1,gpt-5.4-mini,100,0.605,0.52,0.69
+openai,B1,gpt-5.5,100,0.63,0.54,0.72
+openai,B2,gpt-5.4-mini,100,0.84,0.77,0.905
+openai,B2,gpt-5.5,100,0.93,0.88,0.975

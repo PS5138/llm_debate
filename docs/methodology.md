@@ -232,4 +232,8 @@ exp/YYYY-MM-DD_HH-MM-SS_results/
 Generated outputs live under a fresh timestamped folder in `exp/`, which is
 intentionally gitignored while experiments are in progress. For final
 release, commit only the curated final results folder you want readers to
-inspect.
+inspect. The headline OpenAI run is curated at
+[`../results/openai_100/`](../results/openai_100/); a future Anthropic
+run will be curated under `../results/anthropic_100/` in the same shape
+(`headline_results.csv`, `paired_tests.csv`, `baselines_by_arm.csv`,
+`analysis/`, and the plot set) so the two bundles share a column schema.

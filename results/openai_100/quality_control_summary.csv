@@ -1,0 +1,17 @@
+metric,value,numerator,denominator,notes
+quote_verification_correct,1.0,1523,1523,verified quote tags / total quote tags
+quote_verification_incorrect,1.0,1401,1401,verified quote tags / total quote tags
+avg_words_per_turn_correct,134.21333333333334,,,mean words per debater turn across 3 rounds
+avg_words_per_turn_incorrect,135.41333333333333,,,mean words per debater turn across 3 rounds
+debate_outcome_usable_non_conceded,100.0,,,count of cases
+debate_outcome_conceded,0.0,,,count of cases
+debate_outcome_complete_missing_concession_judgement,0.0,,,count of cases
+debate_outcome_incomplete_or_unparsed,0.0,,,count of cases
+position_bias_pct_debate_e1_info_asymmetry_gpt-5.5,5.0,5,100,position-biased cases / cases
+position_bias_pct_debate_e2_double_asymmetry_gpt-5.4-mini,18.0,18,100,position-biased cases / cases
+position_bias_pct_debate_e3_capability_asymmetry_gpt-5.4-mini,9.0,9,100,position-biased cases / cases
+position_bias_pct_debate_e4_full_symmetry_gpt-5.5,3.0,3,100,position-biased cases / cases
+position_bias_pct_baseline_B1_gpt-5.4-mini,21.0,21,100,position-biased cases / cases
+position_bias_pct_baseline_B1_gpt-5.5,10.0,10,100,position-biased cases / cases
+position_bias_pct_baseline_B2_gpt-5.4-mini,8.0,8,100,position-biased cases / cases
+position_bias_pct_baseline_B2_gpt-5.5,2.0,2,100,position-biased cases / cases

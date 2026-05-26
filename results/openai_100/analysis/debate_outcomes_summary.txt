@@ -1,0 +1,12 @@
+Debate outcomes — count of generated debates after completion
+and concession quality-control checks.
+
+                               status  count
+                  usable_non_conceded    100
+                             conceded      0
+complete_missing_concession_judgement      0
+               incomplete_or_unparsed      0
+
+Interpretation: headline debate accuracy should be read over
+usable_non_conceded debates. A large conceded or incomplete
+count means the debate framing needs revision before scaling.

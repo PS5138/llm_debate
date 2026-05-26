@@ -161,11 +161,103 @@ output-directory schemas, see
 
 ## Results
 
-_Pending._ Headline numbers and plots will be filled in here once the
-full OpenAI 100-case run completes and is curated. The Anthropic
-100-case run (Opus 4.6 + Sonnet 4.6) is the planned cross-family
-comparison; canonical Anthropic baselines are already committed at
+**Status.** The OpenAI 100-case run is complete and curated below. The
+Anthropic 100-case run is **still pending** — canonical Anthropic
+baselines are committed, but the debate stage has not yet been executed
+at n=100.
+
+| Family | Status | Curated bundle |
+|---|---|---|
+| OpenAI (`gpt-5.5` / `gpt-5.4-mini`) | Complete (n=100) | [`results/openai_100/`](results/openai_100/) |
+| Anthropic (`claude-opus-4-6` / `claude-sonnet-4-6`) | **Pending** | — |
+
+The raw `exp/` folder remains gitignored because it contains large logs,
+cache files, and full transcripts; each curated bundle in `results/`
+contains the aggregate tables, plots, paired significance tests, and bias
+diagnostics needed to evaluate the run.
+
+### OpenAI 100-case run
+
+| Condition | Judge | Blind | Debate | Oracle | PGR |
+|---|---:|---:|---:|---:|---:|
+| E1 information asymmetry | `gpt-5.5` | 63.0% | 90.5% | 93.0% | 91.7% |
+| E2 double asymmetry | `gpt-5.4-mini` | 60.5% | 84.0% | 84.0% | 100.0% |
+| E3 capability asymmetry | `gpt-5.4-mini` | 60.5% | 87.5% | 84.0% | 114.9% |
+| E4 full symmetry | `gpt-5.5` | 63.0% | 93.5% | 93.0% | 101.7% |
+
+![OpenAI 100-case accuracy by condition](results/openai_100/plots/01_accuracy_by_condition.png)
+
+![OpenAI 100-case Performance Gap Recovered](results/openai_100/plots/02_pgr_by_condition.png)
+
+All four debate arms substantially improve over their same-judge blind
+baselines. The paired debate-vs-blind lifts are +23.5 to +30.5 percentage
+points and remain significant after Holm correction across all eight paired
+tests. Debate-vs-oracle differences are not significant in any arm, so the
+careful interpretation is that the run does not detect a clear gap between
+debate and the same-judge oracle ceiling.
+
+The headline E2 setting, where a weaker judge evaluates stronger debaters
+without seeing the evidence, reaches the weaker judge's oracle baseline:
+84.0% debate accuracy versus 60.5% blind and 84.0% oracle. E3, where the
+same weaker judge also sees the evidence, reaches 87.5%, slightly above the
+weaker-judge oracle baseline in this sample. PGR confidence intervals are
+wide because PGR is a ratio whose denominator is the blind-to-oracle gap
+(only ~23.5pp for the weaker judge and ~30pp for the frontier judge): a
+small, uncertain denominator inflates the ratio's CI even when both
+endpoints are well estimated, so the most robust claim is the paired
+debate-vs-blind lift rather than the exact PGR ordering.
+
+### Bias and quality checks
+
+![OpenAI 100-case position-bias breakdown](results/openai_100/analysis/plots/08_position_bias.png)
+
+The run passes the main quality checks: 100/100 debates were usable and
+non-conceded, quote verification was 100% on both sides, and verbosity was
+balanced at 134.2 words per correct-side turn versus 135.4 per incorrect-side
+turn.
+
+The main caveat is position bias. Swap-averaged scoring already discounts
+order-sensitive cases to 0.5, but E2 still shows 18% position-biased cases.
+That makes E2 directionally encouraging but less clean than E3, which has 9%
+position bias. E1 and E4 are cleaner again at 5% and 3%.
+
+### Discussion
+
+Khan et al. (2024), *Debating with More Persuasive LLMs Leads to More Truthful
+Answers*, studied debate on hard reading-comprehension questions from QuALITY.
+Their paper is linked as [`arXiv:2402.06782`](https://arxiv.org/abs/2402.06782).
+Their central finding was that debate helped both non-expert LLM judges and
+human judges: LLM debate reached roughly 76% accuracy versus a 48% naive
+baseline, while human debate reached roughly 88% versus a 60% naive baseline.
+They also report about 60% Performance Gap Recovered for debate.
+
+This fork keeps the same broad oversight question but moves it into synthetic
+medical differential diagnosis. Instead of asking whether a judge can answer a
+reading-comprehension question without seeing the passage, this experiment asks
+whether debate helps a judge choose the right diagnosis when the underlying
+patient evidence is hidden or costly to inspect. The OpenAI 100-case result is
+stronger than the Khan et al. LLM headline in PGR terms: the debate arms recover
+roughly 92-115% of the blind-to-oracle gap. That should not be read as a direct
+apples-to-apples win, because the task, models, domain, and sampling procedure
+are different. The useful addition is narrower: on this hard DDXPlus slice,
+same-judge debate nearly closes the gap between blind judging and evidence-aware
+oracle judging, while exposing measurable residual risks such as position bias.
+
+The planned next comparison is the Anthropic 100-case run using Opus 4.6 and
+Sonnet 4.6; canonical Anthropic baselines are already committed at
 `data/canonical_baselines/anthropic/`.
+
+### Anthropic 100-case run (pending)
+
+The Anthropic 100-case run has not yet been executed. When it lands it
+will be curated under `results/anthropic_100/` in the same shape as the
+OpenAI bundle — `headline_results.csv`, `paired_tests.csv`,
+`baselines_by_arm.csv`, the analysis subfolder, and the plot set — so the
+cross-family comparison reads cleanly off the same column schema.
+
+Until that run completes, treat the OpenAI numbers above as a
+single-family pilot finding on the DDXPlus hard slice, not a model-family
+robustness claim.
 
 ## How to run
 
@@ -221,8 +313,8 @@ pipeline:
 
 ```bash
 ./scripts/run_medical_full.sh 1   openai      # one-case smoke
-./scripts/run_medical_full.sh 100 openai      # planned headline OpenAI run
-./scripts/run_medical_full.sh 100 anthropic   # planned Anthropic run
+./scripts/run_medical_full.sh 100 openai      # reproduce/extend the OpenAI setup
+./scripts/run_medical_full.sh 100 anthropic   # planned Anthropic comparison
 ```
 
 Both write outputs into a fresh `exp/YYYY-MM-DD_HH-MM-SS_results/`

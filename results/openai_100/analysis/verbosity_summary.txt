@@ -1,0 +1,116 @@
+Verbosity — total words per debate, per side.
+
+Per-side word counts across rounds (averaged over cases):
+            mean  min  max
+side                      
+correct    134.2  114  150
+incorrect  135.4  115  150
+
+Per-case totals:
+side               correct  incorrect  delta_correct_minus_incorrect
+case_id                                                             
+ddxplus_pilot_001      384        395                            -11
+ddxplus_pilot_002      415        417                             -2
+ddxplus_pilot_003      404        419                            -15
+ddxplus_pilot_004      397        385                             12
+ddxplus_pilot_005      402        405                             -3
+ddxplus_pilot_006      403        401                              2
+ddxplus_pilot_007      401        422                            -21
+ddxplus_pilot_008      406        427                            -21
+ddxplus_pilot_009      402        389                             13
+ddxplus_pilot_010      398        396                              2
+ddxplus_pilot_011      395        398                             -3
+ddxplus_pilot_012      413        411                              2
+ddxplus_pilot_013      395        414                            -19
+ddxplus_pilot_014      401        412                            -11
+ddxplus_pilot_015      407        406                              1
+ddxplus_pilot_016      411        358                             53
+ddxplus_pilot_017      416        410                              6
+ddxplus_pilot_018      411        418                             -7
+ddxplus_pilot_019      384        410                            -26
+ddxplus_pilot_020      407        412                             -5
+ddxplus_pilot_021      409        365                             44
+ddxplus_pilot_022      389        406                            -17
+ddxplus_pilot_023      420        410                             10
+ddxplus_pilot_024      414        382                             32
+ddxplus_pilot_025      400        404                             -4
+ddxplus_pilot_026      399        414                            -15
+ddxplus_pilot_027      396        412                            -16
+ddxplus_pilot_028      405        421                            -16
+ddxplus_pilot_029      416        417                             -1
+ddxplus_pilot_030      385        392                             -7
+ddxplus_pilot_031      425        423                              2
+ddxplus_pilot_032      395        399                             -4
+ddxplus_pilot_033      392        421                            -29
+ddxplus_pilot_034      419        420                             -1
+ddxplus_pilot_035      392        411                            -19
+ddxplus_pilot_036      405        404                              1
+ddxplus_pilot_037      423        401                             22
+ddxplus_pilot_038      410        384                             26
+ddxplus_pilot_039      399        405                             -6
+ddxplus_pilot_040      428        415                             13
+ddxplus_pilot_041      397        399                             -2
+ddxplus_pilot_042      383        416                            -33
+ddxplus_pilot_043      401        402                             -1
+ddxplus_pilot_044      424        409                             15
+ddxplus_pilot_045      414        414                              0
+ddxplus_pilot_046      382        403                            -21
+ddxplus_pilot_047      394        402                             -8
+ddxplus_pilot_048      403        389                             14
+ddxplus_pilot_049      410        401                              9
+ddxplus_pilot_050      414        422                             -8
+ddxplus_pilot_051      414        402                             12
+ddxplus_pilot_052      428        407                             21
+ddxplus_pilot_053      395        415                            -20
+ddxplus_pilot_054      408        414                             -6
+ddxplus_pilot_055      390        403                            -13
+ddxplus_pilot_056      395        388                              7
+ddxplus_pilot_057      400        410                            -10
+ddxplus_pilot_058      401        422                            -21
+ddxplus_pilot_059      415        407                              8
+ddxplus_pilot_060      403        430                            -27
+ddxplus_pilot_061      391        397                             -6
+ddxplus_pilot_062      410        426                            -16
+ddxplus_pilot_063      390        387                              3
+ddxplus_pilot_064      383        412                            -29
+ddxplus_pilot_065      388        416                            -28
+ddxplus_pilot_066      390        414                            -24
+ddxplus_pilot_067      408        407                              1
+ddxplus_pilot_068      417        413                              4
+ddxplus_pilot_069      402        396                              6
+ddxplus_pilot_070      397        417                            -20
+ddxplus_pilot_071      406        411                             -5
+ddxplus_pilot_072      404        422                            -18
+ddxplus_pilot_073      397        422                            -25
+ddxplus_pilot_074      408        392                             16
+ddxplus_pilot_075      398        415                            -17
+ddxplus_pilot_076      397        381                             16
+ddxplus_pilot_077      416        405                             11
+ddxplus_pilot_078      388        379                              9
+ddxplus_pilot_079      388        409                            -21
+ddxplus_pilot_080      410        414                             -4
+ddxplus_pilot_081      382        395                            -13
+ddxplus_pilot_082      409        413                             -4
+ddxplus_pilot_083      417        395                             22
+ddxplus_pilot_084      400        408                             -8
+ddxplus_pilot_085      402        396                              6
+ddxplus_pilot_086      392        412                            -20
+ddxplus_pilot_087      389        385                              4
+ddxplus_pilot_088      395        415                            -20
+ddxplus_pilot_089      401        411                            -10
+ddxplus_pilot_090      397        393                              4
+ddxplus_pilot_091      401        437                            -36
+ddxplus_pilot_092      385        405                            -20
+ddxplus_pilot_093      419        410                              9
+ddxplus_pilot_094      393        399                             -6
+ddxplus_pilot_095      380        397                            -17
+ddxplus_pilot_096      431        420                             11
+ddxplus_pilot_097      407        415                             -8
+ddxplus_pilot_098      414        404                             10
+ddxplus_pilot_099      411        404                              7
+ddxplus_pilot_100      407        409                             -2
+
+Interpretation: a large persistent gap between correct- and
+incorrect-side word counts would be a verbosity-bias risk.
+Pearson r between argument length and judge wins becomes
+meaningful at N >= 20.

@@ -1,0 +1,5 @@
+family,condition,judge_model,n_cases,acc_mean,ci_lo,ci_hi
+openai,e1_info_asymmetry,gpt-5.5,100,0.905,0.85,0.955
+openai,e2_double_asymmetry,gpt-5.4-mini,100,0.84,0.78,0.895
+openai,e3_capability_asymmetry,gpt-5.4-mini,100,0.875,0.815,0.93
+openai,e4_full_symmetry,gpt-5.5,100,0.935,0.885,0.975

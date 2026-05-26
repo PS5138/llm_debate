@@ -93,7 +93,7 @@ The pipeline does not run directly on `ddxplus_debate_pilot_100.csv`. Instead,
 by the inherited debate machinery. For example, a blind baseline run writes:
 
 ```text
-exp/medical_debate_n100/baselines/baseline_blind/data0.csv
+exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai/baseline_blind/data0.csv
 ```
 
 That file is an experiment working file, not a final result table. It contains
@@ -104,11 +104,11 @@ After `core.judge` runs, judgement CSVs are written under the judge-model
 subdirectory, for example:
 
 ```text
-exp/medical_debate_n100/baselines/baseline_blind/gpt-5.4-mini/data0_judgement.csv
+exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai/baseline_blind/gpt-5.4-mini/data0_judgement.csv
 ```
 
 The aggregate scored baseline results are appended to:
 
 ```text
-exp/medical_debate_n100/baselines/results.csv
+exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai/results.csv
 ```
