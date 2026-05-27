@@ -263,6 +263,53 @@ are different. The useful addition is narrower: on this hard DDXPlus slice,
 same-judge debate nearly closes the gap between blind judging and evidence-aware
 oracle judging, while exposing measurable residual risks such as position bias.
 
+The pattern across conditions is more informative than any single headline
+number. E1 shows that when a frontier judge does not see the patient evidence
+directly, debate can still transmit enough of the hidden evidence to approach
+the frontier judge's oracle baseline. E2 is the central oversight setting: a
+weaker judge does not see the evidence, but stronger debaters do. Its result is
+encouraging because the weaker judge reaches the same accuracy as its oracle
+baseline, suggesting that debate can sometimes substitute for direct evidence
+inspection. The caveat is that E2 also has the highest position bias, so it is
+the most important arm to replicate and harden before treating the result as
+robust. E3, where the weaker judge sees both the evidence and the debate, is
+cleaner and slightly stronger; that suggests debate may help not only by
+revealing hidden information, but also by organizing a large evidence record
+into competing diagnostic arguments. E4 is the easiest condition — frontier
+judge, frontier debaters, evidence visible — and functions more like a ceiling
+check that the full system can recover the answer when capability and
+information are both available.
+
+The motivating clinical analogy is a busy doctor supervising AI systems in a
+data-rich environment. A real patient record may include years of notes, labs,
+medications, imaging reports, prior diagnoses, and generated model summaries.
+Even a capable clinician may not have time to audit every relevant detail before
+making a decision. Debate offers a possible amplification pattern: multiple AI
+systems with access to the full EHR could argue for competing diagnoses,
+surface the strongest evidence on each side, challenge weak reasoning, and let
+the clinician judge a compressed adversarial transcript rather than search the
+entire record from scratch. In that framing, debate is not replacing the doctor;
+it is trying to make the doctor's limited attention go further.
+
+This experiment is still a simplified proxy for that future. The cases are
+synthetic, the task is two-choice differential diagnosis, and the judge is a
+weaker model rather than a clinician. The patient evidence is structured
+DDXPlus evidence rather than a messy real EHR. But the result is directionally
+interesting because it tests the core bottleneck: can a less-informed or
+time-limited overseer recover much of the value of hidden evidence by reading a
+structured debate between better-informed systems? On this pilot, the answer is
+yes, with the important qualification that bias controls and cross-family
+replication matter.
+
+That qualification is important. Recent work on free-form debate finds that
+debate gains can be sensitive to task structure, model pairing, and training
+conditions rather than automatically robust. See *Investigating the limits of
+free-form debate as a scalable oversight strategy*
+([OpenReview](https://openreview.net/forum?id=vRCGzuAhOM)). Our result is
+encouraging evidence that debate can amplify a weaker judge in a
+medical-diagnosis proxy task, but these gains should not be assumed to
+generalize automatically across tasks, models, or training regimes.
+
 The planned next comparison is the Anthropic 100-case run using Opus 4.6 and
 Sonnet 4.6; canonical Anthropic baselines are already committed at
 `data/canonical_baselines/anthropic/`.
