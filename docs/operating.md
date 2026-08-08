@@ -9,24 +9,7 @@ map.
 ## Interactive frontend in detail
 
 ```bash
-.venv/bin/python -m streamlit run app/streamlit_app.py
-```
-
-Use `python -m streamlit` rather than a bare `streamlit`. The latter resolves
-through `PATH` and commonly picks up an Anaconda or system Streamlit that has
-none of this project's dependencies, failing with `ModuleNotFoundError: No
-module named 'hydra'`.
-
-If you moved the repo after creating `.venv`, the venv's console scripts
-(`.venv/bin/streamlit`, `.venv/bin/pip`, ...) still point at the old absolute
-path and will not run. `.venv/bin/python` itself keeps working, so
-`python -m <tool>` is unaffected; to repair the scripts, recreate the
-environment:
-
-```bash
-rm -rf .venv
-python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+streamlit run app/streamlit_app.py
 ```
 
 Once the page loads:
