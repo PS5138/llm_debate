@@ -33,6 +33,9 @@ from app.runner import (
 )
 from core.scoring.accuracy import find_answer
 
+# Committed DDXPlus pilot size. Both the fresh-run and resume sliders cap here.
+PILOT_MAX_CASES = 100
+
 CONDITION_LABEL = {
     "e1_info_asymmetry": "E1 · info asymmetry",
     "e2_double_asymmetry": "E2 · double asymmetry (headline)",
@@ -157,7 +160,9 @@ with st.sidebar:
     models = FAMILY_MODELS[family]
     st.caption(f"Frontier: `{models['frontier']}` · Weaker judge: `{models['weaker']}`")
 
-    n_cases = st.slider("Number of cases", min_value=1, max_value=100, value=3)
+    n_cases = st.slider(
+        "Number of cases", min_value=1, max_value=PILOT_MAX_CASES, value=3
+    )
 
     est = estimate_cost_usd(family, n_cases)
     if est >= 20:
@@ -296,16 +301,29 @@ with st.sidebar:
                 f"The Recompute toggle above only affects fresh Run clicks."
             )
 
-        resume_target_n = st.slider(
-            "Total cases after this run",
-            min_value=prior_n,
-            max_value=100,
-            value=prior_n,
-            help="Set to the same n to just retry incomplete work. Set higher "
-            "to keep the already-finished cases and add new ones up to the "
-            "new total. The pipeline writes back to the same `data0.csv` "
-            "files, so cases 1..prior_n are not re-spent on.",
-        )
+        # A run already at the pilot ceiling has nothing to extend to, and
+        # Streamlit raises if a slider's min equals its max — which crashed
+        # the whole page for anyone whose most recent run was a full 100-case
+        # one. Offer retry-only in that case instead of a degenerate slider.
+        if prior_n >= PILOT_MAX_CASES:
+            resume_target_n = prior_n
+            st.caption(
+                f"This run is already at the {PILOT_MAX_CASES}-case pilot "
+                f"maximum, so there is nothing further to extend to. Resuming "
+                f"will retry any cases that never completed and re-run the "
+                f"analysis; finished cases are not paid for again."
+            )
+        else:
+            resume_target_n = st.slider(
+                "Total cases after this run",
+                min_value=prior_n,
+                max_value=PILOT_MAX_CASES,
+                value=prior_n,
+                help="Set to the same n to just retry incomplete work. Set higher "
+                "to keep the already-finished cases and add new ones up to the "
+                "new total. The pipeline writes back to the same `data0.csv` "
+                "files, so cases 1..prior_n are not re-spent on.",
+            )
 
         added = resume_target_n - prior_n
         cost_str = ""

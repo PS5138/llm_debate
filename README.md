@@ -385,8 +385,13 @@ session-scoped tempfiles, suited to exploration and chunked
 review-as-you-go workflows.
 
 ```bash
-streamlit run app/streamlit_app.py
+.venv/bin/python -m streamlit run app/streamlit_app.py
 ```
+
+Invoking through `python -m` pins the run to this project's interpreter. A bare
+`streamlit run` uses whichever `streamlit` is first on `PATH` — often a system
+or Anaconda install that lacks `hydra` and the rest of the pipeline, which
+fails at import with `ModuleNotFoundError`.
 
 **One-command CLI** — the full
 `baselines → debate → E1-E4 → concession → analysis → aggregation`
