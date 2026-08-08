@@ -168,6 +168,12 @@ python scripts/aggregate_medical_results.py \
   --baselines-dir data/canonical_baselines/openai \
   --out-dir exp/YYYY-MM-DD_HH-MM-SS_results/medical_results
 
+python scripts/compute_paired_tests.py \
+  exp/YYYY-MM-DD_HH-MM-SS_results/openai \
+  --baselines-dir data/canonical_baselines/openai \
+  --out-dir exp/YYYY-MM-DD_HH-MM-SS_results/medical_results \
+  --analysis-dir exp/YYYY-MM-DD_HH-MM-SS_results/openai/analysis
+
 python scripts/summarise_run_costs.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
 
 python scripts/export_medical_debate_output.py \
@@ -195,6 +201,8 @@ that take it.
 | `scripts/run_medical_debate.sh` | Generates debate transcripts, runs E1-E4 final judges, concession checks, analysis, aggregation, cost summary, and export. |
 | `scripts/analyze_medical_debate.py` | Produces verbosity, quote verification, concession, debate-outcome, and position-bias outputs. |
 | `scripts/aggregate_medical_results.py` | Produces accuracy, PGR, per-case lift tables, and result plots from cached judgement CSVs. |
+| `scripts/compute_paired_tests.py` | Produces `headline_results.csv`, `paired_tests.csv`, and `quality_control_summary.csv` — the curated-bundle statistics. |
+| `scripts/medical_stats.py` | Shared paired statistics (bootstrap, permutation, Holm) used by the two scripts above. Not a CLI. |
 | `scripts/plot_baselines.py` | Renders blind-vs-oracle and position-bias plots from a baselines `results.csv`. |
 | `scripts/summarise_run_costs.py` | Extracts API spend from Hydra logs into `cost_summary.csv`. |
 | `scripts/export_medical_debate_output.py` | Writes a readable Markdown export of one debate and its judgements. |

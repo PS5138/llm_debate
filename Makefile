@@ -5,3 +5,4 @@ hooks:
 
 test:
 	.venv/bin/python tests/test_accuracy.py
+	.venv/bin/python tests/test_medical_stats.py

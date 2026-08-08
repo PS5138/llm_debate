@@ -4,8 +4,8 @@ Reads the cached judgement CSVs under one or more exp_dirs and emits:
 
   exp/medical_results/
     accuracy_by_condition.csv     — accuracy + bootstrap 95% CI per (family, condition).
-    pgr_by_condition.csv          — Performance Gap Recovered per (family, condition);
-                                    NaN until matching baselines (B1, B2) are run.
+    (PGR is computed here to draw plot 02, but is written out by
+     compute_paired_tests.py as part of headline_results.csv.)
     per_case_lift.csv             — per-case correctness, swap-averaged, joined across
                                     conditions; for diagnostic heatmaps.
     plots/01_accuracy_by_condition.png
@@ -39,6 +39,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.scoring.accuracy import find_answer
+from scripts import medical_stats
 
 # ---------------------------------------------------------------------------
 # Pulling per-case correctness out of the judgement CSVs
@@ -202,6 +203,76 @@ def _scan_baselines_for_families(
 # ---------------------------------------------------------------------------
 
 
+def load_per_case_scores(
+    family_dirs: list[Path],
+    baselines_dir: Optional[Path],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read the cached judgement CSVs into swap-averaged per-case scores.
+
+    Returns `(debate_per_case, baselines_per_case)`. Public so
+    `compute_paired_tests.py` derives its per-case vectors from exactly the
+    same parsing and swap-averaging as the tables and plots here — the paired
+    tests must not disagree with the headline accuracies about what a case
+    scored.
+    """
+    per_case_all = (
+        pd.concat(
+            [_scan_family_dir(d, _family_label_from_path(d)) for d in family_dirs],
+            ignore_index=True,
+        )
+        if family_dirs
+        else pd.DataFrame()
+    )
+    baselines_per_case = _scan_baselines_for_families(baselines_dir, family_dirs)
+    return (
+        _swap_average(per_case_all) if not per_case_all.empty else pd.DataFrame(),
+        _swap_average(baselines_per_case)
+        if not baselines_per_case.empty
+        else pd.DataFrame(),
+    )
+
+
+def aligned_case_scores(
+    per_case: pd.DataFrame,
+    baselines_case: pd.DataFrame,
+    family: str,
+    condition: str,
+    judge: str,
+) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Return (debate, blind, oracle) score vectors aligned by case id.
+
+    Only cases present in all three arms for this (family, judge) are kept, so
+    index i refers to the same patient case in every returned array. Returns
+    None when any arm is missing entirely — e.g. baselines for this judge have
+    not been run.
+    """
+    debate = per_case[
+        (per_case["family"] == family)
+        & (per_case["condition"] == condition)
+        & (per_case["judge_model"] == judge)
+    ].set_index("case_id")["acc"]
+
+    def _baseline(arm: str) -> pd.Series:
+        return baselines_case[
+            (baselines_case["family"] == family)
+            & (baselines_case["arm"] == arm)
+            & (baselines_case["judge_model"] == judge)
+        ].set_index("case_id")["acc"]
+
+    blind, oracle = _baseline("B1"), _baseline("B2")
+    if debate.empty or blind.empty or oracle.empty:
+        return None
+
+    common = sorted(set(debate.index) & set(blind.index) & set(oracle.index))
+    if not common:
+        return None
+    return (
+        debate.reindex(common).to_numpy(dtype=float),
+        blind.reindex(common).to_numpy(dtype=float),
+        oracle.reindex(common).to_numpy(dtype=float),
+    )
+
+
 def _swap_average(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse swap=False/True pairs into a single per-case accuracy."""
     grouped = (
@@ -212,21 +283,15 @@ def _swap_average(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def _bootstrap_ci(
-    values: np.ndarray, n_boot: int = 10000, seed: int = 0
-) -> tuple[float, float, float]:
-    """Returns (mean, ci_lo, ci_hi) with 95% percentile bootstrap."""
-    values = np.asarray([v for v in values if not pd.isna(v)], dtype=float)
-    if values.size == 0:
-        return (float("nan"),) * 3
-    rng = np.random.default_rng(seed)
-    indices = rng.integers(0, values.size, size=(n_boot, values.size))
-    means = values[indices].mean(axis=1)
-    return (
-        float(values.mean()),
-        float(np.percentile(means, 2.5)),
-        float(np.percentile(means, 97.5)),
-    )
+def _bootstrap_ci(values: np.ndarray) -> tuple[float, float, float]:
+    """Returns (mean, ci_lo, ci_hi) with 95% percentile bootstrap.
+
+    Delegates to `medical_stats.mean_ci` so this script and
+    `compute_paired_tests.py` share one bootstrap implementation, resample
+    count, and seed. They used to differ, which is how the repo ended up
+    shipping two different CIs for the same PGR values.
+    """
+    return medical_stats.mean_ci(values)
 
 
 def accuracy_table(per_case: pd.DataFrame) -> pd.DataFrame:
@@ -305,13 +370,21 @@ _CONDITION_JUDGE_TYPE = {
 }
 
 
-def pgr_table(accuracy: pd.DataFrame, baselines: pd.DataFrame) -> pd.DataFrame:
+def pgr_table(
+    accuracy: pd.DataFrame,
+    baselines: pd.DataFrame,
+    per_case: pd.DataFrame,
+    baselines_case: pd.DataFrame,
+) -> pd.DataFrame:
     """E2 — PGR per (family, condition).
 
     PGR(condition) = (acc_condition − acc_B1_same_judge) / (acc_B2_same_judge − acc_B1_same_judge).
-    Bootstrap CIs are propagated from the underlying per-case data via the
-    swap-averaged means; for a quick first pass we use a normal-approximation
-    interval until we have enough cases to wire a paired bootstrap.
+
+    The confidence interval is a **case-paired bootstrap** over the underlying
+    per-case scores (`medical_stats.pgr_ci`): each replicate resamples cases
+    once and reads debate, blind, and oracle at those same positions. PGR's
+    numerator and denominator share the blind term, so the arms have to be
+    resampled together.
 
     NaN throughout if `baselines` is empty (baselines haven't been run yet).
     """
@@ -319,36 +392,20 @@ def pgr_table(accuracy: pd.DataFrame, baselines: pd.DataFrame) -> pd.DataFrame:
     if accuracy.empty:
         return pd.DataFrame(rows)
 
-    bl = (
-        baselines.set_index(["family", "arm", "judge_model"])["acc_mean"]
-        if not baselines.empty
-        else None
-    )
-
     for _, r in accuracy.iterrows():
-        cond = r["condition"]
-        judge = r["judge_model"]
-        family = r["family"]
-        pgr, lo, hi = float("nan"), float("nan"), float("nan")
-        if bl is not None:
-            try:
-                b1 = bl.loc[(family, "B1", judge)]
-                b2 = bl.loc[(family, "B2", judge)]
-                if b2 - b1 > 0:
-                    pgr = (r["acc_mean"] - b1) / (b2 - b1)
-                    # Crude CI: propagate the symmetric half-width on acc_mean
-                    half = (r["ci_hi"] - r["ci_lo"]) / 2
-                    if b2 - b1 > 0:
-                        lo = pgr - half / (b2 - b1)
-                        hi = pgr + half / (b2 - b1)
-            except KeyError:
-                pass
+        cond, judge, family = r["condition"], r["judge_model"], r["family"]
+        pgr_val, lo, hi = float("nan"), float("nan"), float("nan")
+        if not baselines_case.empty and not per_case.empty:
+            arms = aligned_case_scores(per_case, baselines_case, family, cond, judge)
+            if arms is not None:
+                debate, blind, oracle = arms
+                pgr_val, lo, hi = medical_stats.pgr_ci(debate, blind, oracle)
         rows.append(
             {
                 "family": family,
                 "condition": cond,
                 "judge_model": judge,
-                "pgr": pgr,
+                "pgr": pgr_val,
                 "pgr_ci_lo": lo,
                 "pgr_ci_hi": hi,
             }
@@ -369,14 +426,25 @@ def per_case_lift_table(
     """
     if per_case.empty or baselines_case.empty:
         return pd.DataFrame()
-    blind = (
-        baselines_case[baselines_case["arm"] == "B1"]
-        .groupby(["family", "judge_model", "case_id"])["acc"]
-        .mean()
-        .rename("blind_acc")
-        .reset_index()
+
+    def _arm(arm: str, column: str) -> pd.DataFrame:
+        return (
+            baselines_case[baselines_case["arm"] == arm]
+            .groupby(["family", "judge_model", "case_id"])["acc"]
+            .mean()
+            .rename(column)
+            .reset_index()
+        )
+
+    merged = per_case.merge(
+        _arm("B1", "blind_acc"), on=["family", "judge_model", "case_id"], how="left"
     )
-    merged = per_case.merge(blind, on=["family", "judge_model", "case_id"], how="left")
+    # `oracle_acc` is carried too so the curated bundle is self-sufficient for
+    # the paired debate-vs-oracle tests. Without it those tests could only be
+    # rebuilt by going back to the baseline judgement CSVs.
+    merged = merged.merge(
+        _arm("B2", "oracle_acc"), on=["family", "judge_model", "case_id"], how="left"
+    )
     merged = merged.rename(columns={"acc": "debate_acc"})
     return merged[
         [
@@ -386,6 +454,7 @@ def per_case_lift_table(
             "case_id",
             "debate_acc",
             "blind_acc",
+            "oracle_acc",
         ]
     ]
 
@@ -644,34 +713,20 @@ def main(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "plots").mkdir(exist_ok=True)
 
-    per_case_all = (
-        pd.concat(
-            [_scan_family_dir(d, _family_label_from_path(d)) for d in family_dirs],
-            ignore_index=True,
-        )
-        if family_dirs
-        else pd.DataFrame()
-    )
-
-    baselines_per_case = _scan_baselines_for_families(baselines_dir, family_dirs)
-
-    per_case_agg = (
-        _swap_average(per_case_all) if not per_case_all.empty else pd.DataFrame()
-    )
-    baselines_case_agg = (
-        _swap_average(baselines_per_case)
-        if not baselines_per_case.empty
-        else pd.DataFrame()
-    )
+    per_case_agg, baselines_case_agg = load_per_case_scores(family_dirs, baselines_dir)
 
     acc = accuracy_table(per_case_agg)
     bls = baseline_table(baselines_case_agg)
-    pgr = pgr_table(acc, bls)
+    pgr = pgr_table(acc, bls, per_case_agg, baselines_case_agg)
     lift = per_case_lift_table(per_case_agg, baselines_case_agg)
 
     if not plots_only:
         acc.to_csv(out_dir / "accuracy_by_condition.csv", index=False)
-        pgr.to_csv(out_dir / "pgr_by_condition.csv", index=False)
+        # PGR is deliberately not written here. `compute_paired_tests.py`
+        # emits it as part of `headline_results.csv`, alongside the blind /
+        # debate / oracle accuracies it is derived from, so there is one PGR
+        # table rather than two that can drift apart. The in-memory `pgr`
+        # table below still drives plot 02.
         lift.to_csv(out_dir / "per_case_lift.csv", index=False)
         if not bls.empty:
             bls.to_csv(out_dir / "baselines_by_arm.csv", index=False)
@@ -682,7 +737,6 @@ def main(
 
     print(f"wrote results to {out_dir}/")
     print(f"  accuracy_by_condition.csv  ({len(acc)} rows)")
-    print(f"  pgr_by_condition.csv       ({len(pgr)} rows)")
     print(f"  per_case_lift.csv          ({len(lift)} rows)")
     if not bls.empty:
         print(f"  baselines_by_arm.csv       ({len(bls)} rows)")

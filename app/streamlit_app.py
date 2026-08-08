@@ -573,7 +573,7 @@ if snap.phase == Phase.DONE and snap.results_dir:
     st.subheader("Aggregate results")
     results_dir = Path(snap.results_dir)
     acc_path = results_dir / "accuracy_by_condition.csv"
-    pgr_path = results_dir / "pgr_by_condition.csv"
+    headline_path = results_dir / "headline_results.csv"
     plots_dir = results_dir / "plots"
 
     cols = st.columns(2)
@@ -582,9 +582,27 @@ if snap.phase == Phase.DONE and snap.results_dir:
             st.markdown("**Accuracy by condition**")
             st.dataframe(pd.read_csv(acc_path), width="stretch", hide_index=True)
     with cols[1]:
-        if pgr_path.exists():
+        if headline_path.exists():
             st.markdown("**PGR by condition**")
-            st.dataframe(pd.read_csv(pgr_path), width="stretch", hide_index=True)
+            # headline_results.csv is the single PGR table (it also carries the
+            # blind/debate/oracle accuracies PGR is derived from). Show the
+            # same-judge floor and ceiling next to PGR rather than all 17
+            # columns, which would not fit this half-width pane.
+            headline = pd.read_csv(headline_path)
+            preferred = [
+                "label",
+                "judge_model",
+                "blind_acc",
+                "debate_acc",
+                "oracle_acc",
+                "pgr",
+                "pgr_ci_lo",
+                "pgr_ci_hi",
+            ]
+            shown = [c for c in preferred if c in headline.columns] or list(
+                headline.columns
+            )
+            st.dataframe(headline[shown], width="stretch", hide_index=True)
 
     if plots_dir.exists():
         for png in sorted(plots_dir.glob("*.png")):

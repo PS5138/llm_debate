@@ -117,6 +117,9 @@ flowchart TD
     P --> R["analyze_medical_debate.py"]
     Q --> S["medical_results/*.csv and plots"]
     R --> T["analysis/*.csv and plots"]
+    S --> U["compute_paired_tests.py"]
+    T --> U
+    U --> V["headline_results.csv<br/>paired_tests.csv<br/>quality_control_summary.csv"]
 ```
 
 Baselines are conceptually fixed reference constants once
@@ -175,6 +178,13 @@ The raw `exp/` folder remains gitignored because it contains large logs,
 cache files, and full transcripts; each curated bundle in `results/`
 contains the aggregate tables, plots, paired significance tests, and bias
 diagnostics needed to evaluate the run.
+
+Every table in a curated bundle is script-generated from the cached judgement
+CSVs, and the committed canonical baselines mean the whole analysis layer can
+be re-run with no API spend. Paired statistics — case-paired bootstrap,
+sign-flip permutation, and Holm correction — are defined once in
+`scripts/medical_stats.py`; see
+[`docs/methodology.md`](docs/methodology.md#paired-statistics).
 
 ### OpenAI 100-case run
 
@@ -397,7 +407,8 @@ patterns. This fork removes the QuALITY-era human-trial and tournament
 tooling and adds the medical dataset loader, DDXPlus pilot preparation,
 medical prompts, model-family configuration, OpenAI/Anthropic adapter
 updates, swap judging, quote verification, concession analysis, result
-aggregation, the Streamlit frontend, and the canonical-baselines layer.
+aggregation, paired significance testing, the Streamlit frontend, and the
+canonical-baselines layer.
 Upstream paper: [`arXiv:2402.06782`](https://arxiv.org/abs/2402.06782).
 
 ## Acknowledgements

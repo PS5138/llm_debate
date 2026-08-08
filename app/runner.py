@@ -1024,6 +1024,27 @@ class DebateRun:
             if outcome is not None:
                 self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
+            rc = self._run_stage(
+                "paired_tests",
+                [
+                    py,
+                    "scripts/compute_paired_tests.py",
+                    str(self.family_dir),
+                    "--baselines-dir",
+                    str(self.baselines_dir),
+                    "--out-dir",
+                    str(self.results_dir),
+                    "--analysis-dir",
+                    str(self.family_dir / "analysis"),
+                ],
+            )
+            outcome = self._stage_outcome("paired_tests", rc)
+            if outcome == "stopped":
+                self._finalise(Phase.STOPPED, "Stopped by user.")
+                return
+            if outcome is not None:
+                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
+                return
 
             self._finalise(Phase.DONE, "Finished.")
 

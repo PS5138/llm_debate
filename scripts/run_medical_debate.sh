@@ -125,6 +125,12 @@ fi
   --baselines-dir "${AGGREGATE_BASELINES_DIR}" \
   --out-dir "${EXP_DIR}/medical_results"
 
+echo ">>> Computing paired significance tests + headline/QC tables (no API spend)"
+"$PYTHON" scripts/compute_paired_tests.py "${AGGREGATE_FAMILY_DIRS[@]}" \
+  --baselines-dir "${AGGREGATE_BASELINES_DIR}" \
+  --out-dir "${EXP_DIR}/medical_results" \
+  --analysis-dir "${EXP}/analysis"
+
 echo ">>> Summarising API spend from logs"
 "$PYTHON" scripts/summarise_run_costs.py "${EXP}"
 
@@ -133,5 +139,6 @@ echo ">>> Summarising API spend from logs"
 echo ">>> Wrote consolidated output to ${EXP}/one_debate_outputs.md"
 echo ">>> Wrote analyses to ${EXP}/analysis/"
 echo ">>> Wrote aggregated results to ${EXP_DIR}/medical_results/"
+echo ">>> Wrote paired tests + headline tables to ${EXP_DIR}/medical_results/"
 echo ">>> Used baselines from ${AGGREGATE_BASELINES_DIR}/ if present"
 echo ">>> Wrote cost summary to ${EXP}/cost_summary.csv"

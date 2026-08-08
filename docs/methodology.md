@@ -150,8 +150,11 @@ The pipeline emits the following diagnostics per family run:
   debater appears to concede or argue for the other answer.
 - **Debate outcome counts.** `analysis/debate_outcomes.csv` reports
   usable / conceded / incomplete / unparsed debates.
-- **Cost summaries.** `cost_summary.csv` extracts API spend lines from the
-  Hydra logs.
+- **Cost summaries.** `cost_summary.csv` extracts API spend from the Hydra
+  logs, one row per log file. The adapters log a *cumulative* running total
+  per process, so each file's spend is the maximum of its snapshots and the
+  run total is the sum of those maxima; summing the raw log lines
+  over-counts several-fold.
 
 Each CSV is accompanied by a `*_summary.txt` with a short human-readable
 explanation, and most have a matching PNG under `analysis/plots/`.
@@ -223,9 +226,11 @@ exp/YYYY-MM-DD_HH-MM-SS_results/
     one_debate_outputs.md
   medical_results/
     accuracy_by_condition.csv
-    pgr_by_condition.csv
     per_case_lift.csv
     baselines_by_arm.csv
+    headline_results.csv
+    paired_tests.csv
+    quality_control_summary.csv
     plots/
 ```
 
@@ -237,3 +242,38 @@ inspect. The headline OpenAI run is curated at
 run will be curated under `../results/anthropic_100/` in the same shape
 (`headline_results.csv`, `paired_tests.csv`, `baselines_by_arm.csv`,
 `analysis/`, and the plot set) so the two bundles share a column schema.
+
+Every file in a curated bundle is script-generated, so a fork can reproduce
+the published tables from cached judgement CSVs without paying for a rerun.
+
+## Paired statistics
+
+All significance testing is paired at the patient-case level: blind, debate,
+and oracle are measured on the same cases, so the per-case scores are compared
+case by case rather than as three independent percentages. The shared
+implementation lives in `scripts/medical_stats.py`, used by both
+`aggregate_medical_results.py` and `compute_paired_tests.py` so no two outputs
+can disagree about the same quantity.
+
+- **Accuracy and mean-difference CIs.** 20,000-replicate percentile
+  bootstrap. Case positions are drawn once per replicate and every arm is read
+  at those positions, preserving the correlation between arms.
+- **PGR CIs.** The same case-paired bootstrap, recomputing PGR from the three
+  resampled accuracies. PGR's numerator and denominator share the blind term,
+  so resampling the arms independently would misstate the interval. Replicates
+  whose blind→oracle gap collapses to zero give an undefined ratio and are
+  dropped from the percentiles.
+- **Paired t-test.** Reported for continuity, but the per-case differences only
+  take values in {-1, -0.5, 0, 0.5, 1}, so normality does not hold and the
+  t-test is an approximation even at n=100.
+- **Sign-flip permutation test.** The distribution-free check that carries the
+  claim: 200,000 replicates flipping the sign of each nonzero per-case
+  difference, with the `(hits + 1) / (replicates + 1)` estimator. The p-value
+  floor is therefore about 5e-06 rather than 0.
+- **Holm correction.** Applied over all eight tests per family
+  (`holm_p_all_8_tests`) and separately within each set of four
+  (`holm_p_within_4_tests`). The all-eight column is the conservative one to
+  cite.
+
+Resample counts and the seed are fixed constants, so repeated runs reproduce
+the published numbers exactly.
