@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 import matplotlib
+
 matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,7 +39,6 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.scoring.accuracy import find_answer
-
 
 # ---------------------------------------------------------------------------
 # Pulling per-case correctness out of the judgement CSVs
@@ -65,7 +65,7 @@ def _split_condition_dir(name: str) -> Optional[tuple[str, str]]:
     for cond in _KNOWN_CONDITIONS:
         prefix = cond + "_"
         if name.startswith(prefix):
-            judge = name[len(prefix):]
+            judge = name[len(prefix) :]
             if judge:
                 return cond, judge
     return None
@@ -212,7 +212,9 @@ def _swap_average(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
-def _bootstrap_ci(values: np.ndarray, n_boot: int = 10000, seed: int = 0) -> tuple[float, float, float]:
+def _bootstrap_ci(
+    values: np.ndarray, n_boot: int = 10000, seed: int = 0
+) -> tuple[float, float, float]:
     """Returns (mean, ci_lo, ci_hi) with 95% percentile bootstrap."""
     values = np.asarray([v for v in values if not pd.isna(v)], dtype=float)
     if values.size == 0:
@@ -220,53 +222,75 @@ def _bootstrap_ci(values: np.ndarray, n_boot: int = 10000, seed: int = 0) -> tup
     rng = np.random.default_rng(seed)
     indices = rng.integers(0, values.size, size=(n_boot, values.size))
     means = values[indices].mean(axis=1)
-    return float(values.mean()), float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+    return (
+        float(values.mean()),
+        float(np.percentile(means, 2.5)),
+        float(np.percentile(means, 97.5)),
+    )
 
 
 def accuracy_table(per_case: pd.DataFrame) -> pd.DataFrame:
     """E1 — accuracy + bootstrap CIs per (family, condition, judge_model)."""
     if per_case.empty:
-        return pd.DataFrame(columns=[
-            "family", "condition", "judge_model", "n_cases",
-            "acc_mean", "ci_lo", "ci_hi",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "family",
+                "condition",
+                "judge_model",
+                "n_cases",
+                "acc_mean",
+                "ci_lo",
+                "ci_hi",
+            ]
+        )
     out: list[dict] = []
     for (family, condition, judge), grp in per_case.groupby(
         ["family", "condition", "judge_model"]
     ):
         mean, lo, hi = _bootstrap_ci(grp["acc"].to_numpy())
-        out.append({
-            "family": family,
-            "condition": condition,
-            "judge_model": judge,
-            "n_cases": int(grp["acc"].notna().sum()),
-            "acc_mean": mean,
-            "ci_lo": lo,
-            "ci_hi": hi,
-        })
+        out.append(
+            {
+                "family": family,
+                "condition": condition,
+                "judge_model": judge,
+                "n_cases": int(grp["acc"].notna().sum()),
+                "acc_mean": mean,
+                "ci_lo": lo,
+                "ci_hi": hi,
+            }
+        )
     return pd.DataFrame(out).sort_values(["family", "condition"]).reset_index(drop=True)
 
 
 def baseline_table(baselines_case: pd.DataFrame) -> pd.DataFrame:
     if baselines_case.empty:
-        return pd.DataFrame(columns=[
-            "family", "arm", "judge_model", "n_cases",
-            "acc_mean", "ci_lo", "ci_hi",
-        ])
+        return pd.DataFrame(
+            columns=[
+                "family",
+                "arm",
+                "judge_model",
+                "n_cases",
+                "acc_mean",
+                "ci_lo",
+                "ci_hi",
+            ]
+        )
     out: list[dict] = []
     for (family, arm, judge), grp in baselines_case.groupby(
         ["family", "arm", "judge_model"]
     ):
         mean, lo, hi = _bootstrap_ci(grp["acc"].to_numpy())
-        out.append({
-            "family": family,
-            "arm": arm,
-            "judge_model": judge,
-            "n_cases": int(grp["acc"].notna().sum()),
-            "acc_mean": mean,
-            "ci_lo": lo,
-            "ci_hi": hi,
-        })
+        out.append(
+            {
+                "family": family,
+                "arm": arm,
+                "judge_model": judge,
+                "n_cases": int(grp["acc"].notna().sum()),
+                "acc_mean": mean,
+                "ci_lo": lo,
+                "ci_hi": hi,
+            }
+        )
     return pd.DataFrame(out).sort_values(["family", "arm"]).reset_index(drop=True)
 
 
@@ -295,7 +319,11 @@ def pgr_table(accuracy: pd.DataFrame, baselines: pd.DataFrame) -> pd.DataFrame:
     if accuracy.empty:
         return pd.DataFrame(rows)
 
-    bl = baselines.set_index(["family", "arm", "judge_model"])["acc_mean"] if not baselines.empty else None
+    bl = (
+        baselines.set_index(["family", "arm", "judge_model"])["acc_mean"]
+        if not baselines.empty
+        else None
+    )
 
     for _, r in accuracy.iterrows():
         cond = r["condition"]
@@ -315,18 +343,24 @@ def pgr_table(accuracy: pd.DataFrame, baselines: pd.DataFrame) -> pd.DataFrame:
                         hi = pgr + half / (b2 - b1)
             except KeyError:
                 pass
-        rows.append({
-            "family": family,
-            "condition": cond,
-            "judge_model": judge,
-            "pgr": pgr,
-            "pgr_ci_lo": lo,
-            "pgr_ci_hi": hi,
-        })
-    return pd.DataFrame(rows).sort_values(["family", "condition"]).reset_index(drop=True)
+        rows.append(
+            {
+                "family": family,
+                "condition": cond,
+                "judge_model": judge,
+                "pgr": pgr,
+                "pgr_ci_lo": lo,
+                "pgr_ci_hi": hi,
+            }
+        )
+    return (
+        pd.DataFrame(rows).sort_values(["family", "condition"]).reset_index(drop=True)
+    )
 
 
-def per_case_lift_table(per_case: pd.DataFrame, baselines_case: pd.DataFrame) -> pd.DataFrame:
+def per_case_lift_table(
+    per_case: pd.DataFrame, baselines_case: pd.DataFrame
+) -> pd.DataFrame:
     """E3 — per case, did debate flip the answer vs baseline?
 
     Joins each per-case (debate) accuracy against the same-judge B1 baseline
@@ -344,9 +378,16 @@ def per_case_lift_table(per_case: pd.DataFrame, baselines_case: pd.DataFrame) ->
     )
     merged = per_case.merge(blind, on=["family", "judge_model", "case_id"], how="left")
     merged = merged.rename(columns={"acc": "debate_acc"})
-    return merged[[
-        "family", "condition", "judge_model", "case_id", "debate_acc", "blind_acc",
-    ]]
+    return merged[
+        [
+            "family",
+            "condition",
+            "judge_model",
+            "case_id",
+            "debate_acc",
+            "blind_acc",
+        ]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +395,12 @@ def per_case_lift_table(per_case: pd.DataFrame, baselines_case: pd.DataFrame) ->
 # ---------------------------------------------------------------------------
 
 
-_COND_ORDER = ["e1_info_asymmetry", "e2_double_asymmetry", "e3_capability_asymmetry", "e4_full_symmetry"]
+_COND_ORDER = [
+    "e1_info_asymmetry",
+    "e2_double_asymmetry",
+    "e3_capability_asymmetry",
+    "e4_full_symmetry",
+]
 _COND_LABELS = {
     "e1_info_asymmetry": "E1\ninfo asym",
     "e2_double_asymmetry": "E2\ndouble asym",
@@ -363,7 +409,9 @@ _COND_LABELS = {
 }
 
 
-def _judge_roles_for_family(accuracy: pd.DataFrame, family: str) -> dict[str, Optional[str]]:
+def _judge_roles_for_family(
+    accuracy: pd.DataFrame, family: str
+) -> dict[str, Optional[str]]:
     """Return {"weaker": <judge_model or None>, "frontier": <judge_model or None>}
     for one family, derived from the accuracy table itself.
 
@@ -374,15 +422,21 @@ def _judge_roles_for_family(accuracy: pd.DataFrame, family: str) -> dict[str, Op
     """
     weaker_conds = {c for c, t in _CONDITION_JUDGE_TYPE.items() if t == "weaker"}
     frontier_conds = {c for c, t in _CONDITION_JUDGE_TYPE.items() if t == "frontier"}
-    w = accuracy[(accuracy["family"] == family) & (accuracy["condition"].isin(weaker_conds))]
-    f = accuracy[(accuracy["family"] == family) & (accuracy["condition"].isin(frontier_conds))]
+    w = accuracy[
+        (accuracy["family"] == family) & (accuracy["condition"].isin(weaker_conds))
+    ]
+    f = accuracy[
+        (accuracy["family"] == family) & (accuracy["condition"].isin(frontier_conds))
+    ]
     return {
         "weaker": str(w["judge_model"].iloc[0]) if not w.empty else None,
         "frontier": str(f["judge_model"].iloc[0]) if not f.empty else None,
     }
 
 
-def plot_accuracy(accuracy: pd.DataFrame, baselines: pd.DataFrame, out_path: Path) -> None:
+def plot_accuracy(
+    accuracy: pd.DataFrame, baselines: pd.DataFrame, out_path: Path
+) -> None:
     """Two-panel per-condition accuracy plot with same-judge baseline pairing.
 
     Left panel ("weaker-judge view") shows B1/B2 anchored to the weaker
@@ -400,18 +454,24 @@ def plot_accuracy(accuracy: pd.DataFrame, baselines: pd.DataFrame, out_path: Pat
     width = 0.35
 
     panels = [
-        (ax_w, "Weaker-judge view (E2 / E3)", "weaker",
-         ["B1", "B2", "e2_double_asymmetry", "e3_capability_asymmetry"]),
-        (ax_f, "Frontier-judge view (E1 / E4)", "frontier",
-         ["B1", "B2", "e1_info_asymmetry", "e4_full_symmetry"]),
+        (
+            ax_w,
+            "Weaker-judge view (E2 / E3)",
+            "weaker",
+            ["B1", "B2", "e2_double_asymmetry", "e3_capability_asymmetry"],
+        ),
+        (
+            ax_f,
+            "Frontier-judge view (E1 / E4)",
+            "frontier",
+            ["B1", "B2", "e1_info_asymmetry", "e4_full_symmetry"],
+        ),
     ]
 
     for ax, title, role, arms in panels:
         base_x = list(range(len(arms)))
         x_labels = [
-            "B1\nblind" if k == "B1"
-            else "B2\noracle" if k == "B2"
-            else _COND_LABELS[k]
+            "B1\nblind" if k == "B1" else "B2\noracle" if k == "B2" else _COND_LABELS[k]
             for k in arms
         ]
 
@@ -430,17 +490,27 @@ def plot_accuracy(accuracy: pd.DataFrame, baselines: pd.DataFrame, out_path: Pat
                             & (baselines["judge_model"] == target_judge)
                         ]
                 else:
-                    rows = accuracy[(accuracy["family"] == family) & (accuracy["condition"] == k)]
+                    rows = accuracy[
+                        (accuracy["family"] == family) & (accuracy["condition"] == k)
+                    ]
                 if rows.empty:
-                    heights.append(np.nan); lo.append(np.nan); hi.append(np.nan)
+                    heights.append(np.nan)
+                    lo.append(np.nan)
+                    hi.append(np.nan)
                 else:
                     heights.append(rows["acc_mean"].mean())
                     lo.append(rows["ci_lo"].mean())
                     hi.append(rows["ci_hi"].mean())
             xs = [b + offset for b in base_x]
             yerr = [
-                [h - l if not (np.isnan(h) or np.isnan(l)) else 0 for h, l in zip(heights, lo)],
-                [u - h if not (np.isnan(h) or np.isnan(u)) else 0 for h, u in zip(heights, hi)],
+                [
+                    h - l if not (np.isnan(h) or np.isnan(l)) else 0
+                    for h, l in zip(heights, lo)
+                ],
+                [
+                    u - h if not (np.isnan(h) or np.isnan(u)) else 0
+                    for h, u in zip(heights, hi)
+                ],
             ]
             label = f"{family} · {target_judge}" if target_judge else family
             ax.bar(xs, heights, width=width, label=label, yerr=yerr, capsize=3)
@@ -454,7 +524,9 @@ def plot_accuracy(accuracy: pd.DataFrame, baselines: pd.DataFrame, out_path: Pat
         ax.spines[["top", "right"]].set_visible(False)
 
     ax_w.set_ylabel("Judge accuracy")
-    fig.suptitle("Per-condition judge accuracy (same-judge baseline pairing, bootstrap 95% CI)")
+    fig.suptitle(
+        "Per-condition judge accuracy (same-judge baseline pairing, bootstrap 95% CI)"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -492,7 +564,8 @@ def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
     if lift.empty:
         return
     fig, axes = plt.subplots(
-        1, max(1, len(_COND_ORDER)),
+        1,
+        max(1, len(_COND_ORDER)),
         figsize=(3 * len(_COND_ORDER), 3.5),
         squeeze=False,
     )
@@ -501,8 +574,16 @@ def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
         sub = lift[lift["condition"] == cond]
         if sub.empty or sub["blind_acc"].isna().all():
             ax.set_title(_COND_LABELS[cond])
-            ax.text(0.5, 0.5, "no baseline data", ha="center", va="center", transform=ax.transAxes)
-            ax.set_xticks([]); ax.set_yticks([])
+            ax.text(
+                0.5,
+                0.5,
+                "no baseline data",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
             continue
         # 2x2 contingency on >=0.5 thresholds. We build the table by direct
         # counts instead of pd.crosstab + reindex; with n=1 a crosstab can
@@ -510,21 +591,32 @@ def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
         sub = sub.copy()
         sub["blind_correct"] = sub["blind_acc"] >= 0.5
         sub["debate_correct"] = sub["debate_acc"] >= 0.5
-        counts = {(False, False): 0, (False, True): 0, (True, False): 0, (True, True): 0}
+        counts = {
+            (False, False): 0,
+            (False, True): 0,
+            (True, False): 0,
+            (True, True): 0,
+        }
         for _, row in sub.iterrows():
             counts[(bool(row["blind_correct"]), bool(row["debate_correct"]))] += 1
         ct = pd.DataFrame(
-            [[counts[(False, False)], counts[(False, True)]],
-             [counts[(True, False)],  counts[(True, True)]]],
+            [
+                [counts[(False, False)], counts[(False, True)]],
+                [counts[(True, False)], counts[(True, True)]],
+            ],
             index=[False, True],
             columns=[False, True],
         )
         im = ax.imshow(ct.values, cmap="Blues")
         for ri in range(2):
             for ci in range(2):
-                ax.text(ci, ri, ct.values[ri, ci], ha="center", va="center", color="black")
-        ax.set_xticks([0, 1]); ax.set_xticklabels(["debate wrong", "debate right"])
-        ax.set_yticks([0, 1]); ax.set_yticklabels(["blind wrong", "blind right"])
+                ax.text(
+                    ci, ri, ct.values[ri, ci], ha="center", va="center", color="black"
+                )
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["debate wrong", "debate right"])
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(["blind wrong", "blind right"])
         ax.set_title(_COND_LABELS[cond])
     fig.suptitle("Per-case lift: debate vs blind baseline (2×2 per condition)")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -543,19 +635,34 @@ def _family_label_from_path(family_dir: Path) -> str:
     return family_dir.name
 
 
-def main(family_dirs: list[Path], baselines_dir: Optional[Path], out_dir: Path, plots_only: bool) -> None:
+def main(
+    family_dirs: list[Path],
+    baselines_dir: Optional[Path],
+    out_dir: Path,
+    plots_only: bool,
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "plots").mkdir(exist_ok=True)
 
-    per_case_all = pd.concat(
-        [_scan_family_dir(d, _family_label_from_path(d)) for d in family_dirs],
-        ignore_index=True,
-    ) if family_dirs else pd.DataFrame()
+    per_case_all = (
+        pd.concat(
+            [_scan_family_dir(d, _family_label_from_path(d)) for d in family_dirs],
+            ignore_index=True,
+        )
+        if family_dirs
+        else pd.DataFrame()
+    )
 
     baselines_per_case = _scan_baselines_for_families(baselines_dir, family_dirs)
 
-    per_case_agg = _swap_average(per_case_all) if not per_case_all.empty else pd.DataFrame()
-    baselines_case_agg = _swap_average(baselines_per_case) if not baselines_per_case.empty else pd.DataFrame()
+    per_case_agg = (
+        _swap_average(per_case_all) if not per_case_all.empty else pd.DataFrame()
+    )
+    baselines_case_agg = (
+        _swap_average(baselines_per_case)
+        if not baselines_per_case.empty
+        else pd.DataFrame()
+    )
 
     acc = accuracy_table(per_case_agg)
     bls = baseline_table(baselines_case_agg)

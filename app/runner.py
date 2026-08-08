@@ -70,7 +70,10 @@ def canonical_baselines_path(family: str) -> Optional[Path]:
     path = CANONICAL_BASELINES_ROOT / family
     if not (path / "results.csv").exists():
         return None
-    required_judges = (FAMILY_MODELS[family]["weaker"], FAMILY_MODELS[family]["frontier"])
+    required_judges = (
+        FAMILY_MODELS[family]["weaker"],
+        FAMILY_MODELS[family]["frontier"],
+    )
     for arm in ("baseline_blind", "baseline_oracle"):
         arm_dir = path / arm
         if not arm_dir.exists():
@@ -81,6 +84,7 @@ def canonical_baselines_path(family: str) -> Optional[Path]:
                 if not (judge_dir / fname).exists():
                     return None
     return path
+
 
 # Per-family concurrency caps, expressed as "how many cases can run in
 # parallel at a time". Anthropic stays conservative because Opus has
@@ -114,7 +118,12 @@ COST_PER_CASE_USD = {
     "anthropic": 2.50,
 }
 
-CONDITIONS = ["e1_info_asymmetry", "e2_double_asymmetry", "e3_capability_asymmetry", "e4_full_symmetry"]
+CONDITIONS = [
+    "e1_info_asymmetry",
+    "e2_double_asymmetry",
+    "e3_capability_asymmetry",
+    "e4_full_symmetry",
+]
 
 
 def create_results_root(base_dir: Path = REPO_ROOT / "exp") -> Path:
@@ -148,6 +157,7 @@ def _extend_working_csv_from_pilot(working_csv: Path, target_n: int) -> int:
     # Use the project's own loader to emit `target_n` fresh rows in
     # internal schema, then take the slice we don't already have.
     from core.load.medical import main as medical_loader
+
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tf:
         tmp_path = Path(tf.name)
     try:
@@ -236,7 +246,10 @@ def find_latest_run(base_dir: Path = REPO_ROOT / "exp") -> Optional[dict]:
         using_canonical = family_record.get("using_canonical_baselines")
         if using_canonical is None:
             canonical = CANONICAL_BASELINES_ROOT / family_name
-            using_canonical = baselines_dir is not None and baselines_dir.resolve() == canonical.resolve()
+            using_canonical = (
+                baselines_dir is not None
+                and baselines_dir.resolve() == canonical.resolve()
+            )
         return {
             "exp_dir": cand,
             "family": family_name,
@@ -268,7 +281,9 @@ class CaseStatus:
     correct: str
     distractor: str
     debate_complete: bool = False
-    arm_answers: dict = field(default_factory=dict)  # condition -> {"answer": str, "correct": Optional[bool]}
+    arm_answers: dict = field(
+        default_factory=dict
+    )  # condition -> {"answer": str, "correct": Optional[bool]}
     transcript_json: Optional[str] = None
 
 
@@ -305,7 +320,9 @@ class DebateRun:
             raise ValueError("n_cases must be between 1 and 100")
         if not openai_key:
             # OpenAI key is required because concession judging defaults to gpt-4o-mini.
-            raise ValueError("OpenAI API key is required (concession judge is gpt-4o-mini)")
+            raise ValueError(
+                "OpenAI API key is required (concession judge is gpt-4o-mini)"
+            )
         if family == "anthropic" and not anthropic_key:
             raise ValueError("Anthropic API key is required for the Anthropic family")
 
@@ -370,18 +387,30 @@ class DebateRun:
                 # source. The baseline subprocess will mkdir as needed on
                 # the next pipeline pass.
                 self.baselines_dir = recorded
-                self.using_canonical_baselines = recorded.resolve() == canonical_path.resolve()
+                self.using_canonical_baselines = (
+                    recorded.resolve() == canonical_path.resolve()
+                )
             else:
                 # Metadata didn't record a baselines_dir at all (very old run).
                 # Fall back to the current canonical/fresh logic so the resume
                 # doesn't hard-fail.
-                canonical = canonical_baselines_path(family) if use_canonical_baselines else None
+                canonical = (
+                    canonical_baselines_path(family)
+                    if use_canonical_baselines
+                    else None
+                )
                 self.using_canonical_baselines = canonical is not None
-                self.baselines_dir = canonical if canonical is not None else fresh_baselines_dir
+                self.baselines_dir = (
+                    canonical if canonical is not None else fresh_baselines_dir
+                )
         else:
-            canonical = canonical_baselines_path(family) if use_canonical_baselines else None
+            canonical = (
+                canonical_baselines_path(family) if use_canonical_baselines else None
+            )
             self.using_canonical_baselines = canonical is not None
-            self.baselines_dir = canonical if canonical is not None else fresh_baselines_dir
+            self.baselines_dir = (
+                canonical if canonical is not None else fresh_baselines_dir
+            )
         self.log_path = self._tempdir / "pipeline.log"
         if not self.is_resume:
             self._write_run_metadata("app/streamlit_app.py")
@@ -563,7 +592,9 @@ class DebateRun:
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    self._append_log("[stop] SIGKILL ignored; subprocess may be stuck in C code")
+                    self._append_log(
+                        "[stop] SIGKILL ignored; subprocess may be stuck in C code"
+                    )
 
         threading.Thread(target=_escalate, daemon=True).start()
 
@@ -604,7 +635,9 @@ class DebateRun:
     # ---------------------------------------------------------------- internals
 
     def _read_cases(self) -> list[CaseStatus]:
-        cases: dict[str, CaseStatus] = {c.case_id: CaseStatus(**vars(c)) for c in self._initial_cases}
+        cases: dict[str, CaseStatus] = {
+            c.case_id: CaseStatus(**vars(c)) for c in self._initial_cases
+        }
 
         debate_csv = self.family_dir / "debate_sim" / "data0.csv"
         if debate_csv.exists():
@@ -624,7 +657,9 @@ class DebateRun:
                         distractor=str(row.get("negative answer", "")),
                     )
                     complete_val = row.get("complete", False)
-                    c.debate_complete = bool(complete_val) and str(complete_val).lower() != "false"
+                    c.debate_complete = (
+                        bool(complete_val) and str(complete_val).lower() != "false"
+                    )
                     transcript = row.get("transcript", "")
                     if transcript:
                         c.transcript_json = transcript
@@ -636,10 +671,15 @@ class DebateRun:
             for sub in sorted(debate_sim.iterdir()):
                 if not sub.is_dir() or sub.name.startswith("concession_"):
                     continue
-                condition = next((c for c in CONDITIONS if sub.name.startswith(c + "_")), None)
+                condition = next(
+                    (c for c in CONDITIONS if sub.name.startswith(c + "_")), None
+                )
                 if condition is None:
                     continue
-                for fname, swap in (("data0_judgement.csv", False), ("data0_swap_judgement.csv", True)):
+                for fname, swap in (
+                    ("data0_judgement.csv", False),
+                    ("data0_swap_judgement.csv", True),
+                ):
                     p = sub / fname
                     if not p.exists():
                         continue
@@ -652,7 +692,9 @@ class DebateRun:
                         if not case_id or case_id not in cases:
                             continue
                         bucket = cases[case_id].arm_answers.setdefault(condition, {})
-                        bucket["swap" if swap else "orig"] = str(row.get("answer_judge", ""))
+                        bucket["swap" if swap else "orig"] = str(
+                            row.get("answer_judge", "")
+                        )
 
         return list(cases.values())
 
@@ -790,7 +832,9 @@ class DebateRun:
                         self._finalise(Phase.STOPPED, "Stopped by user.")
                         return
                     debate_cmd = [
-                        py, "-m", "core.debate",
+                        py,
+                        "-m",
+                        "core.debate",
                         f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
                         f"+experiment={arm}",
                         limit_arg,
@@ -813,7 +857,9 @@ class DebateRun:
                                 self._finalise(Phase.STOPPED, "Stopped by user.")
                                 return
                             cmd = [
-                                py, "-m", stage,
+                                py,
+                                "-m",
+                                stage,
                                 f"exp_dir={self._hydra_exp_dir(self.baselines_dir)}",
                                 f"+experiment={arm}",
                                 limit_arg,
@@ -822,12 +868,16 @@ class DebateRun:
                                 f"++judge_name={judge_model}",
                             ]
                             rc = self._run_stage(f"{arm}:{stage}:{judge_model}", cmd)
-                            outcome = self._stage_outcome(f"{arm}:{stage}:{judge_model}", rc)
+                            outcome = self._stage_outcome(
+                                f"{arm}:{stage}:{judge_model}", rc
+                            )
                             if outcome == "stopped":
                                 self._finalise(Phase.STOPPED, "Stopped by user.")
                                 return
                             if outcome is not None:
-                                self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
+                                self._finalise(
+                                    Phase.ERROR, outcome.removeprefix("error: ")
+                                )
                                 return
 
             # ---- Debate generation -----------------------------------------
@@ -866,7 +916,11 @@ class DebateRun:
             arm_specs = [
                 ("e1_info_asymmetry", "medical_debate", frontier),
                 ("e2_double_asymmetry", "medical_debate_e2_double_asymmetry", weaker),
-                ("e3_capability_asymmetry", "medical_debate_e3_capability_asymmetry", weaker),
+                (
+                    "e3_capability_asymmetry",
+                    "medical_debate_e3_capability_asymmetry",
+                    weaker,
+                ),
                 ("e4_full_symmetry", "medical_debate_e4_full_symmetry", frontier),
             ]
             for cond, experiment, judge_model in arm_specs:
@@ -890,7 +944,9 @@ class DebateRun:
                 if outcome is not None:
                     self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                     return
-                rc = self._run_stage(f"{cond}:score", [py, "-m", "core.scoring.accuracy", *common])
+                rc = self._run_stage(
+                    f"{cond}:score", [py, "-m", "core.scoring.accuracy", *common]
+                )
                 outcome = self._stage_outcome(f"{cond}:score", rc)
                 if outcome == "stopped":
                     self._finalise(Phase.STOPPED, "Stopped by user.")
@@ -900,7 +956,9 @@ class DebateRun:
                     return
 
             # ---- Concession judge ------------------------------------------
-            self._set_phase(Phase.JUDGING, f"Running concession judge ({self.concession_model}).")
+            self._set_phase(
+                Phase.JUDGING, f"Running concession judge ({self.concession_model})."
+            )
             if self._stop_check():
                 self._finalise(Phase.STOPPED, "Stopped by user.")
                 return
@@ -1014,7 +1072,11 @@ def transcript_rounds(transcript_json: str) -> list[dict]:
         for letter, side, label in (("A", a_side, a_label), ("B", b_side, b_label)):
             content = rnd.get(side)
             if isinstance(content, dict):
-                content = content.get("response") or content.get("content") or json.dumps(content)
+                content = (
+                    content.get("response")
+                    or content.get("content")
+                    or json.dumps(content)
+                )
             if not content:
                 continue
             out.append(

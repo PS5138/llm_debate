@@ -22,8 +22,8 @@ import pandas as pd
 
 from app.runner import (
     CONDITIONS,
-    DebateRun,
     FAMILY_MODELS,
+    DebateRun,
     Phase,
     canonical_baselines_path,
     estimate_cost_usd,
@@ -119,6 +119,7 @@ def _swap_averaged_verdict(orig: str, swap: str) -> str:
 
 # --------------------------------------------------------------------------- state
 
+
 def _init_state() -> None:
     st.session_state.setdefault("run", None)
     st.session_state.setdefault("selected_case", None)
@@ -150,7 +151,7 @@ with st.sidebar:
         list(FAMILY_MODELS.keys()),
         index=0,
         help="Frontier debaters / preference judge come from this family. "
-             "The concession judge uses gpt-4o-mini regardless.",
+        "The concession judge uses gpt-4o-mini regardless.",
     )
     models = FAMILY_MODELS[family]
     st.caption(f"Frontier: `{models['frontier']}` · Weaker judge: `{models['weaker']}`")
@@ -193,12 +194,12 @@ with st.sidebar:
             "Recompute baselines (don't use canonical)",
             value=False,
             help="Turn on to re-run blind + oracle baselines from scratch "
-                 "alongside the debate run, for BOTH the weaker and frontier "
-                 "judges (so every debate arm has a same-judge baseline for "
-                 "PGR). Useful if you've changed a judge model or prompt. "
-                 "Adds meaningful cost — for OpenAI ~$0.15 (weaker) plus "
-                 "~$1–2 (frontier) per 100 cases; for Anthropic the "
-                 "frontier baseline is the dominant spend.",
+            "alongside the debate run, for BOTH the weaker and frontier "
+            "judges (so every debate arm has a same-judge baseline for "
+            "PGR). Useful if you've changed a judge model or prompt. "
+            "Adds meaningful cost — for OpenAI ~$0.15 (weaker) plus "
+            "~$1–2 (frontier) per 100 cases; for Anthropic the "
+            "frontier baseline is the dominant spend.",
         )
     else:
         st.caption(
@@ -260,9 +261,7 @@ with st.sidebar:
         )
 
     if confirm_armed:
-        st.caption(
-            "Click **Confirm** to start. Change any setting above to cancel."
-        )
+        st.caption("Click **Confirm** to start. Change any setting above to cancel.")
 
     # ---- Resume or extend previous run --------------------------------
     latest = find_latest_run() if not is_active else None
@@ -298,9 +297,9 @@ with st.sidebar:
             max_value=100,
             value=prior_n,
             help="Set to the same n to just retry incomplete work. Set higher "
-                 "to keep the already-finished cases and add new ones up to the "
-                 "new total. The pipeline writes back to the same `data0.csv` "
-                 "files, so cases 1..prior_n are not re-spent on.",
+            "to keep the already-finished cases and add new ones up to the "
+            "new total. The pipeline writes back to the same `data0.csv` "
+            "files, so cases 1..prior_n are not re-spent on.",
         )
 
         added = resume_target_n - prior_n
@@ -386,7 +385,9 @@ if resume_clicked and latest is not None:
     try:
         new_run = DebateRun(
             family=latest["family"],
-            n_cases=int(resume_target_n) if resume_target_n is not None else latest["n_cases"],
+            n_cases=int(resume_target_n)
+            if resume_target_n is not None
+            else latest["n_cases"],
             openai_key=openai_key.strip(),
             anthropic_key=anthropic_key.strip(),
             resume_from=latest["exp_dir"],
@@ -475,12 +476,16 @@ for c in snap.cases:
             "arms judged": f"{arms_done}/4",
             "correct (hidden)": c.correct,
             "distractor": c.distractor,
-            "question": (c.question[:120] + "…") if len(c.question) > 120 else c.question,
+            "question": (c.question[:120] + "…")
+            if len(c.question) > 120
+            else c.question,
         }
     )
 
 if not case_rows:
-    st.warning("No cases loaded yet. If this persists after the baselines phase, check the log below.")
+    st.warning(
+        "No cases loaded yet. If this persists after the baselines phase, check the log below."
+    )
 else:
     df = pd.DataFrame(case_rows)
     st.dataframe(
@@ -500,12 +505,18 @@ else:
 
 st.subheader("Inspect a case")
 case_ids = [c.case_id for c in snap.cases]
-selected = st.selectbox(
-    "Pick a case to read its debate",
-    case_ids,
-    index=case_ids.index(st.session_state["selected_case"]) if st.session_state.get("selected_case") in case_ids else 0,
-    key="selected_case",
-) if case_ids else None
+selected = (
+    st.selectbox(
+        "Pick a case to read its debate",
+        case_ids,
+        index=case_ids.index(st.session_state["selected_case"])
+        if st.session_state.get("selected_case") in case_ids
+        else 0,
+        key="selected_case",
+    )
+    if case_ids
+    else None
+)
 
 if selected:
     case = next((c for c in snap.cases if c.case_id == selected), None)
@@ -536,7 +547,9 @@ if selected:
 
         # Per-arm answers
         st.markdown("---")
-        st.markdown("**Judge picks per arm** (✓ = picked the correct side after swap-averaging)")
+        st.markdown(
+            "**Judge picks per arm** (✓ = picked the correct side after swap-averaging)"
+        )
         rows = []
         for cond in CONDITIONS:
             answers = case.arm_answers.get(cond, {})
