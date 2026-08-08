@@ -676,7 +676,24 @@ def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
         # 2x2 contingency on >=0.5 thresholds. We build the table by direct
         # counts instead of pd.crosstab + reindex; with n=1 a crosstab can
         # be 1x1 and pandas refuses to set a missing bool-indexed cell.
-        sub = sub.copy()
+        #
+        # Drop cases missing a score in either arm first: `NaN >= 0.5` is
+        # False, so an unscoreable case would otherwise be plotted as one the
+        # judge got wrong.
+        sub = sub.dropna(subset=["blind_acc", "debate_acc"]).copy()
+        if sub.empty:
+            ax.set_title(_COND_LABELS[cond])
+            ax.text(
+                0.5,
+                0.5,
+                "no scoreable cases",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
         sub["blind_correct"] = sub["blind_acc"] >= 0.5
         sub["debate_correct"] = sub["debate_acc"] >= 0.5
         counts = {

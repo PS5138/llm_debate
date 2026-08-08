@@ -33,6 +33,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -96,7 +97,12 @@ def build_tables(
                     continue
                 debate, blind, oracle = arms
                 label = _CONDITION_LABELS.get(condition, condition)
-                n_cases = int(debate.size)
+                # Count cases that are actually usable in all three arms. A
+                # case whose judging passes did not both parse is NaN and is
+                # dropped from every statistic below, so reporting the raw
+                # array length would overstate what the numbers rest on.
+                usable = ~(np.isnan(debate) | np.isnan(blind) | np.isnan(oracle))
+                n_cases = int(usable.sum())
 
                 d_acc, d_lo, d_hi = medical_stats.mean_ci(debate)
                 b_acc, b_lo, b_hi = medical_stats.mean_ci(blind)
@@ -135,6 +141,10 @@ def build_tables(
                     t_stat, p_ttest = medical_stats.paired_t_test(debate, reference)
                     p_perm = medical_stats.paired_permutation_p(debate, reference)
                     diffs = debate - reference
+                    # NaN != 0 evaluates True, so unusable pairs would be
+                    # counted as genuine disagreements. Restrict to pairs
+                    # where both arms scored the case.
+                    paired = diffs[~np.isnan(diffs)]
                     test_rows.append(
                         {
                             "family": family,
@@ -142,11 +152,11 @@ def build_tables(
                             "label": label,
                             "judge_model": judge,
                             "comparison": comparison,
-                            "n_cases": n_cases,
+                            "n_cases": int(paired.size),
                             "mean_diff": mean_diff,
                             "bootstrap_ci_lo": ci_lo,
                             "bootstrap_ci_hi": ci_hi,
-                            "nonzero_pairs": int((diffs != 0).sum()),
+                            "nonzero_pairs": int((paired != 0).sum()),
                             "t_statistic": t_stat,
                             "p_ttest": p_ttest,
                             "p_permutation": p_perm,
@@ -285,6 +295,22 @@ def build_quality_control(analysis_dir: Path, family: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _clear_stale_outputs(out_dir: Path, reason: str) -> None:
+    """Delete result files this run cannot regenerate.
+
+    This stage is non-fatal, and `--out-dir` is reused across a resume or
+    extend. Leaving a previous run's `headline_results.csv` in place while
+    reporting success would present stale numbers as current ones, and the
+    Streamlit runner only inspects the exit code. Removing them makes the
+    failure visible instead of silently authoritative.
+    """
+    for name in ("headline_results.csv", "paired_tests.csv"):
+        target = out_dir / name
+        if target.exists():
+            target.unlink()
+            print(f"removed stale {target} ({reason})", file=sys.stderr)
+
+
 def _write_quality_control(
     family_dirs: list[Path],
     out_dir: Path,
@@ -347,6 +373,7 @@ def main(
             "judging stages first. Skipping paired tests.",
             file=sys.stderr,
         )
+        _clear_stale_outputs(out_dir, "no debate judgements")
         return
     if baselines_case.empty:
         print(
@@ -356,6 +383,7 @@ def main(
             "data/canonical_baselines). Skipping paired tests.",
             file=sys.stderr,
         )
+        _clear_stale_outputs(out_dir, "no baselines")
         _write_quality_control(family_dirs, out_dir, analysis_dir)
         return
 
@@ -378,6 +406,7 @@ def main(
             "used by the debate arms. Skipping paired tests.",
             file=sys.stderr,
         )
+        _clear_stale_outputs(out_dir, "no scoreable condition")
         _write_quality_control(family_dirs, out_dir, analysis_dir)
         return
 

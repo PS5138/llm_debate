@@ -50,8 +50,12 @@ CONCESSION_MODEL="${CONCESSION_MODEL:-gpt-4o-mini}"
 # the requested directory is absent or incomplete, which is what makes the
 # bare `./scripts/run_medical_debate.sh 1` smoke run work.
 echo ">>> Resolving baselines for ${FAMILY}"
+# Validate against THIS run's judges and case count, not the family defaults,
+# so FRONTIER/WEAKER overrides and short baseline sets are caught here rather
+# than producing NaN PGR after the debate has been paid for.
 if ! RESOLVED_BASELINES_DIR="$("$PYTHON" scripts/resolve_baselines.py \
-      --family "${FAMILY}" --candidate "${BASELINES_DIR}")"; then
+      --family "${FAMILY}" --candidate "${BASELINES_DIR}" \
+      --weaker "${WEAKER}" --frontier "${FRONTIER}" --min-rows "${LIMIT}")"; then
   echo "" >&2
   echo "Refusing to start: no usable baselines, and the debate stage costs money." >&2
   exit 1
@@ -120,7 +124,10 @@ echo ">>> Running concession judge (${CONCESSION_MODEL}; Y/N only — keep on a 
   "++judge_name=concession_${CONCESSION_MODEL}"
 
 echo ">>> Running bias-control analyses (verbosity / quote-rate / concession)"
-"$PYTHON" scripts/analyze_medical_debate.py "${EXP}"
+# --baselines-dir is what puts B1/B2 into the position-bias table; without it
+# the CLI's QC covers only the debate arms.
+"$PYTHON" scripts/analyze_medical_debate.py "${EXP}" \
+  --baselines-dir "${BASELINES_DIR}"
 
 echo ">>> Aggregating accuracy + PGR + per-case lift (no API spend)"
 AGGREGATE_FAMILY_DIRS=()
@@ -149,8 +156,15 @@ echo ">>> Computing paired significance tests + headline/QC tables (no API spend
   --out-dir "${EXP_DIR}/medical_results"
 
 echo ">>> Summarising API spend from logs"
-# Both roots: baseline stages log under the baselines dir, not the family dir.
-"$PYTHON" scripts/summarise_run_costs.py "${EXP}" "${BASELINES_DIR}"
+# Include the baselines dir only when this run generated it. Canonical
+# baselines carry the logs from whenever they were produced, so scanning them
+# would add that historical spend to every future run's total.
+COST_ROOTS=("${EXP}")
+case "${BASELINES_DIR}" in
+  "${EXP_DIR}"/*) COST_ROOTS+=("${BASELINES_DIR}") ;;
+  *) echo ">>> (baselines are external/canonical; their logs are not this run's spend)" ;;
+esac
+"$PYTHON" scripts/summarise_run_costs.py "${COST_ROOTS[@]}"
 
 "$PYTHON" scripts/export_medical_debate_output.py "${EXP}" --limit "${LIMIT}" --family "${FAMILY}"
 

@@ -82,11 +82,10 @@ async def run_debates(
     full_df.to_csv(filename, index=False, encoding="utf-8")
     LOGGER.info(f"Time taken: {datetime.now() - start_time}")
 
-    # cleanup cache
-    if full_df["complete"].eq(True).all():
-        return True
-    else:
-        return False
+    # `correct` is how many of this attempt's incomplete rows finished. The
+    # retry loop uses it to tell a partial failure worth retrying from a total
+    # one that would just re-bill the same failing calls.
+    return bool(full_df["complete"].eq(True).all()), int(correct)
 
 
 @hydra.main(version_base=None, config_path="config/", config_name="config")
@@ -137,11 +136,19 @@ async def async_main(cfg: DictConfig):
         api_handler,
     )
 
-    # Heuristic to work out num threads
+    # Heuristic to work out num threads. Each case fans out into BoN candidate
+    # generations, so divide the thread budget by BoN to get concurrent cases.
+    #
+    # This must stay an int >= 1. True division returned a float, and
+    # `asyncio.Semaphore(1.25)` does not limit concurrency to one — it lets
+    # every waiting task straight through, so a CLI run with the default
+    # THREADS=5 and BoN=4 issued unbounded concurrent requests instead of the
+    # single case the heuristic intended.
     _BoN_correct = cfg.correct_debater.BoN
     _BoN_incorrect = cfg.incorrect_debater.BoN
-    num_debate_threads = int(cfg.anthropic_num_threads) / max(
-        1, _BoN_correct, _BoN_incorrect
+    num_debate_threads = max(
+        1,
+        int(cfg.anthropic_num_threads) // max(1, _BoN_correct, _BoN_incorrect),
     )
 
     LOGGER.info(f"Running debates with {num_debate_threads} threads")

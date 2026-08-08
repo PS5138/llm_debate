@@ -13,7 +13,6 @@ import openai
 import pandas as pd
 import typer
 import yaml
-from tenacity import retry, retry_if_result, stop_after_attempt
 
 from core.rollouts.utils import TranscriptConfig
 
@@ -182,20 +181,73 @@ def typer_async(f):
     return wrapper
 
 
-@retry(
-    stop=stop_after_attempt(16),
-    retry=retry_if_result(lambda result: result is not True),
-)
-def function_with_retry(function, *args, **kwargs):
-    return function(*args, **kwargs)
+# Stage-level retry budget. A stage reports (complete, newly_completed); the
+# retry loop stops as soon as an attempt completes nothing new, because a
+# stage that made zero progress will not make any on the next identical
+# attempt either. That distinction matters: a transient rate limit leaves some
+# rows finished and is worth retrying, while a bad key or an unknown model
+# fails every row, and blindly retrying re-pays for the partial work each
+# time. Override the ceiling with MEDICAL_MAX_ATTEMPTS.
+MAX_STAGE_ATTEMPTS = int(os.environ.get("MEDICAL_MAX_ATTEMPTS", "16"))
 
 
-@retry(
-    stop=stop_after_attempt(16),
-    retry=retry_if_result(lambda result: result is not True),
-)
-async def async_function_with_retry(function, *args, **kwargs):
-    return await function(*args, **kwargs)
+def _unpack_stage_result(result) -> tuple[bool, int | None]:
+    """Normalise a stage's return value to (complete, newly_completed).
+
+    Stages that report progress return a `(bool, int)` tuple. Older stages
+    return a bare bool, for which progress is unknown and the no-progress
+    guard cannot apply.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        complete, progress = result
+        return bool(complete) is True and complete is not None, int(progress)
+    return result is True, None
+
+
+def _log_attempt(attempt: int, max_attempts: int, progress: int | None) -> bool:
+    """Log one failed attempt. Returns True if retrying is worthwhile."""
+    if progress is None:
+        LOGGER.info(
+            f"Attempt {attempt}/{max_attempts} did not complete the stage; retrying."
+        )
+        return True
+    if progress > 0:
+        LOGGER.info(
+            f"Attempt {attempt}/{max_attempts} completed {progress} new row(s) "
+            f"but the stage is not finished; retrying."
+        )
+        return True
+    LOGGER.error(
+        f"Attempt {attempt}/{max_attempts} completed 0 new rows. Retrying would "
+        f"re-issue the same failing calls and be billed again, so the stage is "
+        f"stopping here. Check the errors above — a bad API key, an unknown "
+        f"model name, or an exhausted quota all look like this."
+    )
+    return False
+
+
+def function_with_retry(function, *args, max_attempts: int = None, **kwargs):
+    max_attempts = max_attempts or MAX_STAGE_ATTEMPTS
+    for attempt in range(1, max_attempts + 1):
+        complete, progress = _unpack_stage_result(function(*args, **kwargs))
+        if complete:
+            return True
+        if attempt == max_attempts or not _log_attempt(attempt, max_attempts, progress):
+            return False
+    return False
+
+
+async def async_function_with_retry(
+    function, *args, max_attempts: int = None, **kwargs
+):
+    max_attempts = max_attempts or MAX_STAGE_ATTEMPTS
+    for attempt in range(1, max_attempts + 1):
+        complete, progress = _unpack_stage_result(await function(*args, **kwargs))
+        if complete:
+            return True
+        if attempt == max_attempts or not _log_attempt(attempt, max_attempts, progress):
+            return False
+    return False
 
 
 def log_model_timings(api_handler, save_location="./model_timings.png"):

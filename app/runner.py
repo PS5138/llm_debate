@@ -40,11 +40,22 @@ FAMILY_MODELS = {
 }
 
 
-def missing_baseline_files(path: Path, family: str) -> list[str]:
-    """Return the baseline judgement files missing from `path` for `family`.
+def missing_baseline_files(
+    path: Path,
+    family: str,
+    judges: tuple[str, str] | None = None,
+    min_rows: int | None = None,
+) -> list[str]:
+    """Return the baseline judgement files unusable in `path` for `family`.
 
-    An empty list means the directory is fully populated for BOTH the weaker
-    and frontier judges.
+    An empty list means the directory is fully populated for BOTH judges.
+
+    `judges` overrides the family defaults, so a run using FRONTIER/WEAKER
+    overrides validates the baselines it will actually pair against rather
+    than the ones the defaults imply. `min_rows` additionally requires each
+    file to hold at least that many judged cases — a 5-case baseline set is
+    not a valid floor for a 100-case debate, and an empty file is not a
+    baseline at all.
 
     Required layout (per judge role for this family):
       <path>/baseline_blind/<weaker>/data0_judgement.csv
@@ -67,7 +78,7 @@ def missing_baseline_files(path: Path, family: str) -> list[str]:
     """
     if family not in FAMILY_MODELS:
         return [f"unknown family: {family}"]
-    required_judges = (
+    required_judges = judges or (
         FAMILY_MODELS[family]["weaker"],
         FAMILY_MODELS[family]["frontier"],
     )
@@ -76,14 +87,49 @@ def missing_baseline_files(path: Path, family: str) -> list[str]:
         for judge in required_judges:
             for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
                 rel = Path(arm) / judge / fname
-                if not (path / rel).exists():
+                target = path / rel
+                if not target.exists():
                     missing.append(rel.as_posix())
+                    continue
+                rows = _judged_row_count(target)
+                if rows is None:
+                    missing.append(f"{rel.as_posix()} (unreadable or empty)")
+                elif min_rows is not None and rows < min_rows:
+                    missing.append(
+                        f"{rel.as_posix()} (only {rows} judged case(s), need {min_rows})"
+                    )
     return missing
 
 
-def baselines_dir_is_complete(path: Path, family: str) -> bool:
+def _judged_row_count(path: Path) -> Optional[int]:
+    """Number of rows carrying a judgement, or None if the file is unusable.
+
+    Presence of a file says nothing about whether the baseline actually ran:
+    a zero-byte placeholder, a header-only CSV, or a file whose judgement
+    column is entirely blank all satisfy an existence check while providing
+    no baseline at all.
+    """
+    try:
+        df = pd.read_csv(path, keep_default_na=False)
+    except Exception:
+        return None
+    if df.empty:
+        return 0
+    judged = [c for c in df.columns if c.startswith("answer_judge")]
+    if not judged:
+        return 0
+    filled = df[judged[0]].astype(str).str.strip().ne("")
+    return int(filled.sum())
+
+
+def baselines_dir_is_complete(
+    path: Path,
+    family: str,
+    judges: tuple[str, str] | None = None,
+    min_rows: int | None = None,
+) -> bool:
     """True if `path` holds a full set of baseline judgements for `family`."""
-    return not missing_baseline_files(path, family)
+    return not missing_baseline_files(path, family, judges=judges, min_rows=min_rows)
 
 
 def canonical_baselines_path(family: str) -> Optional[Path]:

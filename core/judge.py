@@ -54,7 +54,7 @@ def _reconcile_judgement_with_data(data_csv: Path, judgement_csv: Path) -> None:
 
     # Append any rows the judgement CSV is missing.
     if len(data_df) > len(j_df):
-        new_rows = data_df.iloc[len(j_df):].copy()
+        new_rows = data_df.iloc[len(j_df) :].copy()
         for col in j_df.columns:
             if col not in new_rows.columns:
                 if col.startswith("complete"):
@@ -142,10 +142,9 @@ async def run_judge(
     full_df.update(df)
 
     full_df.to_csv(filename, index=False)
-    if full_df[complete_column].eq(True).all():
-        return True
-    else:
-        return False
+    # See core/debate.py: the second element is how many rows this attempt
+    # newly completed, which the retry loop uses as its no-progress guard.
+    return bool(full_df[complete_column].eq(True).all()), int(correct)
 
 
 @hydra.main(version_base=None, config_path="config/", config_name="config")

@@ -34,17 +34,31 @@ from app.runner import (  # noqa: E402
 )
 
 
-def resolve(family: str, candidate: Path | None) -> tuple[Path | None, str]:
-    """Return (resolved_dir, human-readable explanation)."""
+def resolve(
+    family: str,
+    candidate: Path | None,
+    judges: tuple[str, str] | None = None,
+    min_rows: int | None = None,
+) -> tuple[Path | None, str]:
+    """Return (resolved_dir, human-readable explanation).
+
+    `judges` and `min_rows` are checked against the run that is about to
+    start, not against the family defaults: a run overriding FRONTIER/WEAKER
+    needs baselines for *those* models, and an N-case debate needs baselines
+    covering at least N cases.
+    """
     if family not in FAMILY_MODELS:
         return None, f"unknown family: {family}"
 
+    def _check(path: Path) -> list[str]:
+        return missing_baseline_files(path, family, judges=judges, min_rows=min_rows)
+
     if candidate is not None and candidate.exists():
-        missing = missing_baseline_files(candidate, family)
+        missing = _check(candidate)
         if not missing:
             return candidate, f"using baselines in {candidate}"
-        shortfall = f"{len(missing)} file(s) missing, first: {missing[0]}"
-        note = f"{candidate} is not a complete baseline set ({shortfall})"
+        shortfall = f"{len(missing)} issue(s), first: {missing[0]}"
+        note = f"{candidate} is not a usable baseline set ({shortfall})"
     elif candidate is not None:
         note = f"{candidate} does not exist"
     else:
@@ -52,13 +66,28 @@ def resolve(family: str, candidate: Path | None) -> tuple[Path | None, str]:
 
     canonical = canonical_baselines_path(family)
     if canonical is not None:
-        return canonical, f"{note}; falling back to canonical baselines at {canonical}"
+        canonical_missing = _check(canonical)
+        if not canonical_missing:
+            return (
+                canonical,
+                f"{note}; falling back to canonical baselines at {canonical}",
+            )
+        note = (
+            f"{note}; the canonical baselines at {canonical} do not match this "
+            f"run either ({len(canonical_missing)} issue(s), first: "
+            f"{canonical_missing[0]})"
+        )
 
-    judges = FAMILY_MODELS[family]
+    required = judges or (
+        FAMILY_MODELS[family]["weaker"],
+        FAMILY_MODELS[family]["frontier"],
+    )
     return None, (
-        f"{note}, and no complete canonical baselines for '{family}' either.\n"
+        f"{note}.\n"
         f"PGR needs a same-judge blind and oracle baseline for every debate "
-        f"arm, covering both '{judges['weaker']}' and '{judges['frontier']}'.\n"
+        f"arm, covering both '{required[0]}' and '{required[1]}'"
+        + (f", over at least {min_rows} case(s)" if min_rows else "")
+        + ".\n"
         f"Generate them first:\n"
         f"    ./scripts/run_medical_baselines.sh <N> <dir> {family}\n"
         f"then pass that directory as the 4th argument to "
@@ -70,6 +99,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", required=True)
     parser.add_argument(
+        "--weaker",
+        default=None,
+        help="Weaker judge for this run (FRONTIER/WEAKER override).",
+    )
+    parser.add_argument("--frontier", default=None, help="Frontier judge for this run.")
+    parser.add_argument(
+        "--min-rows",
+        type=int,
+        default=None,
+        help="Require each baseline file to cover at least this many cases.",
+    )
+    parser.add_argument(
         "--candidate",
         type=Path,
         default=None,
@@ -77,7 +118,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    resolved, explanation = resolve(args.family, args.candidate)
+    judges = None
+    if args.weaker and args.frontier:
+        judges = (args.weaker, args.frontier)
+    resolved, explanation = resolve(
+        args.family, args.candidate, judges=judges, min_rows=args.min_rows
+    )
     if resolved is None:
         print(explanation, file=sys.stderr)
         return 1
