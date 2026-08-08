@@ -29,6 +29,8 @@ from typing import Optional
 
 import pandas as pd
 
+from core.scoring.accuracy import find_answer
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PILOT_CSV = REPO_ROOT / "data" / "ddxplus" / "ddxplus_debate_pilot_100.csv"
 CANONICAL_BASELINES_ROOT = REPO_ROOT / "data" / "canonical_baselines"
@@ -45,6 +47,7 @@ def missing_baseline_files(
     family: str,
     judges: tuple[str, str] | None = None,
     min_rows: int | None = None,
+    expected_ids: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Return the baseline judgement files unusable in `path` for `family`.
 
@@ -53,9 +56,9 @@ def missing_baseline_files(
     `judges` overrides the family defaults, so a run using FRONTIER/WEAKER
     overrides validates the baselines it will actually pair against rather
     than the ones the defaults imply. `min_rows` additionally requires each
-    file to hold at least that many judged cases — a 5-case baseline set is
-    not a valid floor for a 100-case debate, and an empty file is not a
-    baseline at all.
+    file to hold at least that many completed, parseable judgements. When
+    `expected_ids` is supplied, those exact cases must provide the judgements;
+    unrelated rows cannot make up the requested count.
 
     Required layout (per judge role for this family):
       <path>/baseline_blind/<weaker>/data0_judgement.csv
@@ -71,10 +74,9 @@ def missing_baseline_files(
     baselines) means a folder missing either judge would silently produce
     NaN PGR for half the debate arms, so both judges are required by name.
 
-    Caveat: this only checks for the *presence* of the CSVs. It does not
-    detect stale baselines (correct judges, but generated against an older
-    prompt or dataset). Freshness is governed by the regeneration rules in
-    `data/canonical_baselines/README.md`.
+    This does not detect stale baselines generated with the right case IDs and
+    judges but an older prompt. Freshness is governed by the regeneration
+    rules in `data/canonical_baselines/README.md`.
     """
     if family not in FAMILY_MODELS:
         return [f"unknown family: {family}"]
@@ -91,35 +93,154 @@ def missing_baseline_files(
                 if not target.exists():
                     missing.append(rel.as_posix())
                     continue
-                rows = _judged_row_count(target)
-                if rows is None:
-                    missing.append(f"{rel.as_posix()} (unreadable or empty)")
-                elif min_rows is not None and rows < min_rows:
-                    missing.append(
-                        f"{rel.as_posix()} (only {rows} judged case(s), need {min_rows})"
-                    )
+                issue = _baseline_csv_issue(
+                    target, min_rows=min_rows, expected_ids=expected_ids
+                )
+                if issue is not None:
+                    missing.append(f"{rel.as_posix()} ({issue})")
     return missing
 
 
-def _judged_row_count(path: Path) -> Optional[int]:
-    """Number of rows carrying a judgement, or None if the file is unusable.
+def pilot_case_ids(n_cases: int) -> tuple[str, ...]:
+    """Return the first `n_cases` IDs from the prepared medical pilot.
 
-    Presence of a file says nothing about whether the baseline actually ran:
-    a zero-byte placeholder, a header-only CSV, or a file whose judgement
-    column is entirely blank all satisfy an existence check while providing
-    no baseline at all.
+    An empty or short tuple is intentionally returned when the pilot cannot be
+    read. Passing that result into baseline validation fails closed instead of
+    silently accepting rows from an unknown dataset.
+    """
+    if n_cases < 1:
+        return ()
+    try:
+        pilot = pd.read_csv(
+            PILOT_CSV,
+            usecols=["case_id"],
+            dtype={"case_id": str},
+            keep_default_na=False,
+        )
+    except Exception:
+        return ()
+    return tuple(pilot["case_id"].astype(str).str.strip().head(n_cases))
+
+
+def _judgement_is_parseable(value: object) -> bool:
+    """Whether the analysis will be able to score this judgement.
+
+    This must agree with `_judge_correctness` in
+    `scripts/aggregate_medical_results.py`, which is what actually produces
+    the per-case scores: exactly one of A/B found means scoreable, anything
+    else becomes NaN and is dropped.
+
+    `func_correct_ab` is deliberately NOT used here. It maps an explicitly
+    inconclusive answer ("Answer: Inconclusive", "Answer: Unclear", ...) to
+    False rather than "Unknown", so a baseline full of inconclusive verdicts
+    would pass validation and then score as all-NaN downstream — precisely
+    the silent failure this preflight exists to catch.
+    """
+    text = str(value).strip()
+    lowered = text.lower()
+    if not text or "error message:" in lowered or "error occurred" in lowered:
+        return False
+    try:
+        found_a = bool(find_answer(text, "A"))
+        found_b = bool(find_answer(text, "B"))
+    except (IndexError, TypeError, ValueError):
+        return False
+    return found_a != found_b
+
+
+def _baseline_csv_issue(
+    path: Path,
+    min_rows: int | None = None,
+    expected_ids: tuple[str, ...] | None = None,
+) -> Optional[str]:
+    """Return why one baseline CSV is unusable, or None when it is sound.
+
+    A usable requested row has a unique, non-empty case ID, an explicitly true
+    completion flag, and a judgement the production accuracy parser accepts.
     """
     try:
         df = pd.read_csv(path, keep_default_na=False)
     except Exception:
-        return None
+        return "unreadable"
     if df.empty:
-        return 0
-    judged = [c for c in df.columns if c.startswith("answer_judge")]
-    if not judged:
-        return 0
-    filled = df[judged[0]].astype(str).str.strip().ne("")
-    return int(filled.sum())
+        return "empty"
+
+    id_column = (
+        "id" if "id" in df.columns else "case_id" if "case_id" in df.columns else None
+    )
+    if id_column is None:
+        return "missing id column"
+    ids = df[id_column].astype(str).str.strip()
+    blank_ids = int(ids.eq("").sum())
+    if blank_ids:
+        return f"{blank_ids} blank case ID(s)"
+    duplicate_ids = sorted(set(ids[ids.duplicated(keep=False)]))
+    if duplicate_ids:
+        preview = ", ".join(duplicate_ids[:3])
+        return f"duplicate case ID(s): {preview}"
+
+    answer_columns = [c for c in df.columns if c.startswith("answer_judge")]
+    if "answer_judge" in answer_columns:
+        answer_columns.remove("answer_judge")
+        answer_columns.insert(0, "answer_judge")
+    pair = next(
+        (
+            (answer, f"complete_{answer.removeprefix('answer_')}")
+            for answer in answer_columns
+            if f"complete_{answer.removeprefix('answer_')}" in df.columns
+        ),
+        None,
+    )
+    if pair is None:
+        if not answer_columns:
+            return "missing judgement column"
+        return "missing completion column for judgement"
+    answer_column, complete_column = pair
+
+    complete = df[complete_column].map(
+        lambda value: value is True or str(value).strip().lower() == "true"
+    )
+    parseable = df[answer_column].map(_judgement_is_parseable)
+    valid = complete & parseable
+
+    if expected_ids is not None:
+        expected = tuple(str(case_id).strip() for case_id in expected_ids)
+        if not expected:
+            return "no expected pilot case IDs available"
+        if len(set(expected)) != len(expected):
+            return "expected pilot case IDs are not unique"
+        if min_rows is not None and len(expected) < min_rows:
+            return f"only {len(expected)} expected pilot case ID(s), need {min_rows}"
+        missing_ids = [case_id for case_id in expected if case_id not in set(ids)]
+        if missing_ids:
+            preview = ", ".join(missing_ids[:3])
+            return f"missing expected case ID(s): {preview}"
+        required = ids.isin(expected)
+        required_count = len(expected)
+    else:
+        required_count = len(df) if min_rows is None else min_rows
+        if required_count < 1:
+            return "minimum row count must be positive"
+        if len(df) < required_count:
+            return f"only {len(df)} case row(s), need {required_count}"
+        required = pd.Series(False, index=df.index)
+        required.iloc[:required_count] = True
+
+    valid_count = int((valid & required).sum())
+    if valid_count < required_count:
+        incomplete_count = int((~complete & required).sum())
+        unparseable_count = int((complete & ~parseable & required).sum())
+        details = []
+        if incomplete_count:
+            details.append(f"{incomplete_count} incomplete")
+        if unparseable_count:
+            details.append(f"{unparseable_count} unparseable/error")
+        suffix = f"; {', '.join(details)}" if details else ""
+        return (
+            f"only {valid_count}/{required_count} requested case(s) have completed, "
+            f"parseable judgements{suffix}"
+        )
+    return None
 
 
 def baselines_dir_is_complete(
@@ -127,12 +248,23 @@ def baselines_dir_is_complete(
     family: str,
     judges: tuple[str, str] | None = None,
     min_rows: int | None = None,
+    expected_ids: tuple[str, ...] | None = None,
 ) -> bool:
     """True if `path` holds a full set of baseline judgements for `family`."""
-    return not missing_baseline_files(path, family, judges=judges, min_rows=min_rows)
+    return not missing_baseline_files(
+        path,
+        family,
+        judges=judges,
+        min_rows=min_rows,
+        expected_ids=expected_ids,
+    )
 
 
-def canonical_baselines_path(family: str) -> Optional[Path]:
+def canonical_baselines_path(
+    family: str,
+    min_rows: int | None = None,
+    expected_ids: tuple[str, ...] | None = None,
+) -> Optional[Path]:
     """Return the committed canonical baselines dir for a family if it has
     been *fully* populated for BOTH judges, else None.
     """
@@ -141,7 +273,13 @@ def canonical_baselines_path(family: str) -> Optional[Path]:
     path = CANONICAL_BASELINES_ROOT / family
     if not (path / "results.csv").exists():
         return None
-    return path if baselines_dir_is_complete(path, family) else None
+    return (
+        path
+        if baselines_dir_is_complete(
+            path, family, min_rows=min_rows, expected_ids=expected_ids
+        )
+        else None
+    )
 
 
 # Per-family concurrency caps, expressed as "how many cases can run in
@@ -388,6 +526,7 @@ class DebateRun:
         self.n_cases = int(n_cases)
         self.concession_model = concession_model
         self.is_resume = resume_from is not None
+        expected_baseline_ids = pilot_case_ids(self.n_cases)
 
         self._tempdir = Path(tempfile.mkdtemp(prefix="medical_debate_app_"))
         self._secrets_path = self._tempdir / "SECRETS"
@@ -444,16 +583,42 @@ class DebateRun:
                 # the sidebar toggle here would silently switch the baseline
                 # source. The baseline subprocess will mkdir as needed on
                 # the next pipeline pass.
+                recorded_is_canonical = recorded.resolve() == canonical_path.resolve()
+                if (
+                    recorded_is_canonical
+                    and canonical_baselines_path(
+                        family,
+                        min_rows=self.n_cases,
+                        expected_ids=expected_baseline_ids,
+                    )
+                    is None
+                ):
+                    # Never turn an invalid committed reference bundle into a
+                    # writable resume target. Failing here prevents both paid
+                    # downstream work and accidental changes under data/.
+                    try:
+                        self._secrets_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    shutil.rmtree(self._tempdir, ignore_errors=True)
+                    raise ValueError(
+                        "the canonical baselines recorded for this run are "
+                        f"incomplete or invalid for its first {self.n_cases} "
+                        "pilot case(s); rebuild the canonical bundle or start "
+                        "a fresh run with baseline recomputation enabled"
+                    )
                 self.baselines_dir = recorded
-                self.using_canonical_baselines = (
-                    recorded.resolve() == canonical_path.resolve()
-                )
+                self.using_canonical_baselines = recorded_is_canonical
             else:
                 # Metadata didn't record a baselines_dir at all (very old run).
                 # Fall back to the current canonical/fresh logic so the resume
                 # doesn't hard-fail.
                 canonical = (
-                    canonical_baselines_path(family)
+                    canonical_baselines_path(
+                        family,
+                        min_rows=self.n_cases,
+                        expected_ids=expected_baseline_ids,
+                    )
                     if use_canonical_baselines
                     else None
                 )
@@ -463,7 +628,13 @@ class DebateRun:
                 )
         else:
             canonical = (
-                canonical_baselines_path(family) if use_canonical_baselines else None
+                canonical_baselines_path(
+                    family,
+                    min_rows=self.n_cases,
+                    expected_ids=expected_baseline_ids,
+                )
+                if use_canonical_baselines
+                else None
             )
             self.using_canonical_baselines = canonical is not None
             self.baselines_dir = (

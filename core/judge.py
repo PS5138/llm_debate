@@ -150,7 +150,11 @@ async def run_judge(
 @hydra.main(version_base=None, config_path="config/", config_name="config")
 def main(cfg: DictConfig):
     complete = asyncio.run(async_main(cfg))
-    return complete
+    if not complete:
+        raise RuntimeError(
+            "Judge stage did not complete; see the preceding errors for details."
+        )
+    return True
 
 
 async def async_main(cfg: DictConfig):
@@ -217,6 +221,8 @@ async def async_main(cfg: DictConfig):
         n_vote=cfg.judge.n_vote,
         judge_type=cfg.judge_type,
     )
+    if not complete:
+        return False
 
     # Run swap = True
     filename_swap = experiment.get_debate_filename(seed=cfg.seed, swap=True)

@@ -31,6 +31,7 @@ from app.runner import (  # noqa: E402
     FAMILY_MODELS,
     canonical_baselines_path,
     missing_baseline_files,
+    pilot_case_ids,
 )
 
 
@@ -50,8 +51,16 @@ def resolve(
     if family not in FAMILY_MODELS:
         return None, f"unknown family: {family}"
 
+    expected_ids = pilot_case_ids(min_rows) if min_rows is not None else None
+
     def _check(path: Path) -> list[str]:
-        return missing_baseline_files(path, family, judges=judges, min_rows=min_rows)
+        return missing_baseline_files(
+            path,
+            family,
+            judges=judges,
+            min_rows=min_rows,
+            expected_ids=expected_ids,
+        )
 
     if candidate is not None and candidate.exists():
         missing = _check(candidate)

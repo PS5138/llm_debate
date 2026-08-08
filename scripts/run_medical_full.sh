@@ -15,7 +15,7 @@
 #   PYTHON=.venv/bin/python        choose interpreter
 #   RUN_TESTS=0                    skip the local parser test
 #   PREPARE_DATA=1                 rebuild the DDXPlus pilot before running
-#   FRONTIER=gpt-5.5 WEAKER=...    override debate models
+#   FRONTIER=gpt-5.5 WEAKER=...    override debate and baseline judge models
 #   CONCESSION_MODEL=gpt-4o-mini   override concession judge model
 
 set -euo pipefail
@@ -42,12 +42,28 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 case "$FAMILY" in
-  openai|anthropic) ;;
+  openai)
+    DEFAULT_FRONTIER="gpt-5.5"
+    DEFAULT_WEAKER="gpt-5.4-mini"
+    ;;
+  anthropic)
+    DEFAULT_FRONTIER="claude-opus-4-6"
+    DEFAULT_WEAKER="claude-sonnet-4-6"
+    ;;
   *)
     echo "unknown family: ${FAMILY}; expected 'openai' or 'anthropic'" >&2
     exit 1
     ;;
 esac
+
+FRONTIER="${FRONTIER:-${DEFAULT_FRONTIER}}"
+WEAKER="${WEAKER:-${DEFAULT_WEAKER}}"
+if [[ "$FRONTIER" == "$WEAKER" ]]; then
+  BASELINE_JUDGES="$FRONTIER"
+else
+  BASELINE_JUDGES="${WEAKER},${FRONTIER}"
+fi
+export FRONTIER WEAKER
 
 require_secret_key() {
   local key="$1"
@@ -84,6 +100,7 @@ EVIDENCE_DEFS="data/ddxplus/release_evidences.json"
 echo ">>> Medical debate full run"
 echo ">>> n=${LIMIT} family=${FAMILY} exp_root=${EXP_ROOT}"
 echo ">>> baselines_dir=${BASELINES_DIR} threads=${THREADS} python=${PYTHON}"
+echo ">>> weaker=${WEAKER} frontier=${FRONTIER}"
 
 if [[ "$RUN_TESTS" == "1" ]]; then
   echo ">>> Running local parser test"
@@ -106,7 +123,8 @@ else
 fi
 
 echo ">>> Running blind and oracle baselines"
-./scripts/run_medical_baselines.sh "$LIMIT" "$BASELINES_DIR" "$FAMILY"
+./scripts/run_medical_baselines.sh \
+  "$LIMIT" "$BASELINES_DIR" "$FAMILY" "$BASELINE_JUDGES"
 
 echo ">>> Running debate generation, final judging, analysis, and export"
 ./scripts/run_medical_debate.sh "$LIMIT" "$EXP_ROOT" "$FAMILY" "$BASELINES_DIR"

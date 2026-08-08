@@ -99,15 +99,23 @@ def build_tables(
                 label = _CONDITION_LABELS.get(condition, condition)
                 # Count cases that are actually usable in all three arms. A
                 # case whose judging passes did not both parse is NaN and is
-                # dropped from every statistic below, so reporting the raw
-                # array length would overstate what the numbers rest on.
+                # dropped from every headline statistic below, so reporting
+                # the raw array length would overstate what the numbers rest
+                # on. Keep the three displayed arm means and PGR on this same
+                # cohort; otherwise the displayed means need not reconstruct
+                # the displayed PGR.
                 usable = ~(np.isnan(debate) | np.isnan(blind) | np.isnan(oracle))
                 n_cases = int(usable.sum())
+                headline_debate = debate[usable]
+                headline_blind = blind[usable]
+                headline_oracle = oracle[usable]
 
-                d_acc, d_lo, d_hi = medical_stats.mean_ci(debate)
-                b_acc, b_lo, b_hi = medical_stats.mean_ci(blind)
-                o_acc, o_lo, o_hi = medical_stats.mean_ci(oracle)
-                pgr_val, pgr_lo, pgr_hi = medical_stats.pgr_ci(debate, blind, oracle)
+                d_acc, d_lo, d_hi = medical_stats.mean_ci(headline_debate)
+                b_acc, b_lo, b_hi = medical_stats.mean_ci(headline_blind)
+                o_acc, o_lo, o_hi = medical_stats.mean_ci(headline_oracle)
+                pgr_val, pgr_lo, pgr_hi = medical_stats.pgr_ci(
+                    headline_debate, headline_blind, headline_oracle
+                )
 
                 headline_rows.append(
                     {
@@ -295,6 +303,13 @@ def build_quality_control(analysis_dir: Path, family: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _remove_stale_output(target: Path, reason: str) -> None:
+    """Remove one output that this run cannot regenerate."""
+    if target.exists():
+        target.unlink()
+        print(f"removed stale {target} ({reason})", file=sys.stderr)
+
+
 def _clear_stale_outputs(out_dir: Path, reason: str) -> None:
     """Delete result files this run cannot regenerate.
 
@@ -305,10 +320,7 @@ def _clear_stale_outputs(out_dir: Path, reason: str) -> None:
     failure visible instead of silently authoritative.
     """
     for name in ("headline_results.csv", "paired_tests.csv"):
-        target = out_dir / name
-        if target.exists():
-            target.unlink()
-            print(f"removed stale {target} ({reason})", file=sys.stderr)
+        _remove_stale_output(out_dir / name, reason)
 
 
 def _write_quality_control(
@@ -341,6 +353,7 @@ def _write_quality_control(
 
     if not frames:
         print("quality_control_summary.csv skipped — no QC inputs found")
+        _remove_stale_output(out_dir / "quality_control_summary.csv", "no QC inputs")
         return
     combined = pd.concat(frames, ignore_index=True)
     combined.to_csv(out_dir / "quality_control_summary.csv", index=False)
@@ -374,6 +387,9 @@ def main(
             file=sys.stderr,
         )
         _clear_stale_outputs(out_dir, "no debate judgements")
+        _remove_stale_output(
+            out_dir / "quality_control_summary.csv", "no debate judgements"
+        )
         return
     if baselines_case.empty:
         print(

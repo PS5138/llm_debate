@@ -28,6 +28,7 @@ from app.runner import (
     canonical_baselines_path,
     estimate_cost_usd,
     find_latest_run,
+    pilot_case_ids,
     transcript_rounds,
 )
 from core.scoring.accuracy import find_answer
@@ -182,7 +183,11 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Baselines")
-    canonical = canonical_baselines_path(family)
+    canonical = canonical_baselines_path(
+        family,
+        min_rows=n_cases,
+        expected_ids=pilot_case_ids(n_cases),
+    )
     if canonical is not None:
         st.caption(
             f"Canonical baselines for **{family}** are committed at "

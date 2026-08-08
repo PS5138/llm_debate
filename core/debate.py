@@ -91,7 +91,11 @@ async def run_debates(
 @hydra.main(version_base=None, config_path="config/", config_name="config")
 def main(cfg: DictConfig):
     complete = asyncio.run(async_main(cfg))
-    return complete
+    if not complete:
+        raise RuntimeError(
+            "Debate stage did not complete; see the preceding errors for details."
+        )
+    return True
 
 
 async def async_main(cfg: DictConfig):
@@ -162,6 +166,8 @@ async def async_main(cfg: DictConfig):
         limit=cfg.limit,
         num_debate_threads=num_debate_threads,
     )
+    if not complete:
+        return False
 
     # for sequential debate you must run swap at rollout time since it is not possible to do before judging
     if cfg.method_type == "seq" or (cfg.method == "debate" and cfg.use_intermediary):
