@@ -40,25 +40,25 @@ FAMILY_MODELS = {
 }
 
 
-def canonical_baselines_path(family: str) -> Optional[Path]:
-    """Return the committed canonical baselines dir for a family if it has
-    been *fully* populated for BOTH the weaker and frontier judges, else None.
+def missing_baseline_files(path: Path, family: str) -> list[str]:
+    """Return the baseline judgement files missing from `path` for `family`.
+
+    An empty list means the directory is fully populated for BOTH the weaker
+    and frontier judges.
 
     Required layout (per judge role for this family):
-      <family>/results.csv
-      <family>/baseline_blind/<weaker>/data0_judgement.csv
-      <family>/baseline_blind/<weaker>/data0_swap_judgement.csv
-      <family>/baseline_blind/<frontier>/data0_judgement.csv
-      <family>/baseline_blind/<frontier>/data0_swap_judgement.csv
-      <family>/baseline_oracle/<weaker>/data0_judgement.csv
-      <family>/baseline_oracle/<weaker>/data0_swap_judgement.csv
-      <family>/baseline_oracle/<frontier>/data0_judgement.csv
-      <family>/baseline_oracle/<frontier>/data0_swap_judgement.csv
+      <path>/baseline_blind/<weaker>/data0_judgement.csv
+      <path>/baseline_blind/<weaker>/data0_swap_judgement.csv
+      <path>/baseline_blind/<frontier>/data0_judgement.csv
+      <path>/baseline_blind/<frontier>/data0_swap_judgement.csv
+      <path>/baseline_oracle/<weaker>/data0_judgement.csv
+      <path>/baseline_oracle/<weaker>/data0_swap_judgement.csv
+      <path>/baseline_oracle/<frontier>/data0_judgement.csv
+      <path>/baseline_oracle/<frontier>/data0_swap_judgement.csv
 
     Same-judge PGR pairing (E1/E4 ↔ frontier baselines, E2/E3 ↔ weaker
     baselines) means a folder missing either judge would silently produce
-    NaN PGR for half the debate arms. Requiring both judges by name forces
-    a partial regeneration to fall through to fresh recompute instead.
+    NaN PGR for half the debate arms, so both judges are required by name.
 
     Caveat: this only checks for the *presence* of the CSVs. It does not
     detect stale baselines (correct judges, but generated against an older
@@ -66,24 +66,36 @@ def canonical_baselines_path(family: str) -> Optional[Path]:
     `data/canonical_baselines/README.md`.
     """
     if family not in FAMILY_MODELS:
-        return None
-    path = CANONICAL_BASELINES_ROOT / family
-    if not (path / "results.csv").exists():
-        return None
+        return [f"unknown family: {family}"]
     required_judges = (
         FAMILY_MODELS[family]["weaker"],
         FAMILY_MODELS[family]["frontier"],
     )
+    missing: list[str] = []
     for arm in ("baseline_blind", "baseline_oracle"):
-        arm_dir = path / arm
-        if not arm_dir.exists():
-            return None
         for judge in required_judges:
-            judge_dir = arm_dir / judge
             for fname in ("data0_judgement.csv", "data0_swap_judgement.csv"):
-                if not (judge_dir / fname).exists():
-                    return None
-    return path
+                rel = Path(arm) / judge / fname
+                if not (path / rel).exists():
+                    missing.append(rel.as_posix())
+    return missing
+
+
+def baselines_dir_is_complete(path: Path, family: str) -> bool:
+    """True if `path` holds a full set of baseline judgements for `family`."""
+    return not missing_baseline_files(path, family)
+
+
+def canonical_baselines_path(family: str) -> Optional[Path]:
+    """Return the committed canonical baselines dir for a family if it has
+    been *fully* populated for BOTH judges, else None.
+    """
+    if family not in FAMILY_MODELS:
+        return None
+    path = CANONICAL_BASELINES_ROOT / family
+    if not (path / "results.csv").exists():
+        return None
+    return path if baselines_dir_is_complete(path, family) else None
 
 
 # Per-family concurrency caps, expressed as "how many cases can run in
@@ -1024,6 +1036,8 @@ class DebateRun:
             if outcome is not None:
                 self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
+            # No --analysis-dir: the script derives one per family dir, which
+            # keeps the QC table correct if more than one family is present.
             rc = self._run_stage(
                 "paired_tests",
                 [
@@ -1034,8 +1048,6 @@ class DebateRun:
                     str(self.baselines_dir),
                     "--out-dir",
                     str(self.results_dir),
-                    "--analysis-dir",
-                    str(self.family_dir / "analysis"),
                 ],
             )
             outcome = self._stage_outcome("paired_tests", rc)

@@ -243,8 +243,11 @@ run will be curated under `../results/anthropic_100/` in the same shape
 (`headline_results.csv`, `paired_tests.csv`, `baselines_by_arm.csv`,
 `analysis/`, and the plot set) so the two bundles share a column schema.
 
-Every file in a curated bundle is script-generated, so a fork can reproduce
-the published tables from cached judgement CSVs without paying for a rerun.
+Every file in a curated bundle is script-generated. Regenerating one needs that
+run's judgement CSVs under `exp/`, which is gitignored — so a fresh clone must
+run the debate and judging stages before it can rebuild the tables. The
+analysis layer adds no API cost on top of that, and the committed canonical
+baselines mean the blind and oracle arms never have to be re-run at all.
 
 ## Paired statistics
 
@@ -270,10 +273,19 @@ can disagree about the same quantity.
   claim: 200,000 replicates flipping the sign of each nonzero per-case
   difference, with the `(hits + 1) / (replicates + 1)` estimator. The p-value
   floor is therefore about 5e-06 rather than 0.
-- **Holm correction.** Applied over all eight tests per family
-  (`holm_p_all_8_tests`) and separately within each set of four
-  (`holm_p_within_4_tests`). The all-eight column is the conservative one to
-  cite.
+- **Holm correction.** Applied per family over that family's whole set of
+  tests, and separately within each comparison type. **Both** p-values are
+  corrected, in their own columns, so it is never ambiguous which test a
+  correction belongs to: `holm_p_permutation_all` / `holm_p_permutation_within`
+  and `holm_p_ttest_all` / `holm_p_ttest_within`. Since the permutation test
+  is the one that carries the claim, `holm_p_permutation_all` is the column to
+  cite. `n_tests_all` and `n_tests_within` record how many tests were in each
+  correction family, so a partial run cannot be mistaken for a full one.
+
+Note that the permutation p-value has a floor of about 5e-06, so any Holm
+adjustment of it is bounded below by roughly 4e-05 no matter how large the
+effect. A permutation-based adjusted p at that floor means "as significant as
+200,000 replicates can show", not a weaker result than the t-test's.
 
 Resample counts and the seed are fixed constants, so repeated runs reproduce
 the published numbers exactly.

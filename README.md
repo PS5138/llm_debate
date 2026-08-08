@@ -179,10 +179,14 @@ cache files, and full transcripts; each curated bundle in `results/`
 contains the aggregate tables, plots, paired significance tests, and bias
 diagnostics needed to evaluate the run.
 
-Every table in a curated bundle is script-generated from the cached judgement
-CSVs, and the committed canonical baselines mean the whole analysis layer can
-be re-run with no API spend. Paired statistics — case-paired bootstrap,
-sign-flip permutation, and Holm correction — are defined once in
+Every table in a curated bundle is script-generated from a run's cached
+judgement CSVs — none of it is assembled by hand. Those judgements live under
+`exp/`, which is gitignored, so re-running the analysis requires a run of your
+own: the analysis layer itself costs nothing, but the debate transcripts that
+feed it do. What a fresh clone *does* get for free are the committed canonical
+baselines, which supply the blind and oracle floor and ceiling for PGR without
+re-running either. Paired statistics — case-paired bootstrap, sign-flip
+permutation, and Holm correction — are defined once in
 `scripts/medical_stats.py`; see
 [`docs/methodology.md`](docs/methodology.md#paired-statistics).
 

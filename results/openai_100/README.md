@@ -42,9 +42,13 @@ CSVs — nothing here is assembled by hand. To reproduce it:
 python scripts/aggregate_medical_results.py exp/<run>/openai \
     --baselines-dir data/canonical_baselines --out-dir results/openai_100
 python scripts/compute_paired_tests.py     exp/<run>/openai \
-    --baselines-dir data/canonical_baselines --out-dir results/openai_100 \
-    --analysis-dir results/openai_100/analysis
+    --baselines-dir data/canonical_baselines --out-dir results/openai_100
 ```
+
+Both read the run's cached judgement CSVs under `exp/`, which is gitignored.
+A fresh clone has the canonical baselines but not those judgements, so
+reproducing this bundle from a clone means running the debate stage first —
+the analysis layer is free, the transcripts that feed it are not.
 
 ![Accuracy by condition](plots/01_accuracy_by_condition.png)
 
@@ -82,14 +86,19 @@ a change in overall percentages.
 
 Primary tests compare each debate arm against its same-judge blind baseline.
 All four debate arms remain significant after Holm correction across all eight
-paired tests.
+paired tests, on both the permutation test and the t-test.
 
-| Condition | Debate vs blind lift | Holm-adjusted p |
-|---|---:|---:|
-| E1 info asymmetry | +27.5 points | 0.000000034 |
-| E2 double asymmetry | +23.5 points | 0.0000184 |
-| E3 capability asymmetry | +27.0 points | 0.00000270 |
-| E4 full symmetry | +30.5 points | 0.000000014 |
+| Condition | Debate vs blind lift | Holm-adj. permutation p | Holm-adj. t-test p |
+|---|---:|---:|---:|
+| E1 info asymmetry | +27.5 points | 0.00004 | 0.000000034 |
+| E2 double asymmetry | +23.5 points | 0.00005 | 0.0000184 |
+| E3 capability asymmetry | +27.0 points | 0.00004 | 0.00000270 |
+| E4 full symmetry | +30.5 points | 0.00004 | 0.000000014 |
+
+The permutation column is the one to cite: it assumes nothing about normality,
+which matters because the per-case differences are discrete. Its values sit at
+the resolution floor of a 200,000-replicate permutation test rather than
+indicating a weaker effect.
 
 Debate-vs-oracle comparisons are not significant in any condition. That should
 be read as "no detected difference from oracle" rather than proof of equality.
@@ -117,6 +126,13 @@ Those two judgements are collapsed into one swap-averaged per-case score:
 | wrong | wrong | judge chose the wrong diagnosis both times | 0.0 |
 | correct | wrong | judge preferred position A | 0.5 |
 | wrong | correct | judge preferred position B | 0.5 |
+| any | unparseable | cannot be swap-averaged | excluded |
+
+A case is only scored when both passes parse. Scoring one off a single
+surviving pass would bypass the position-bias control that swap judging exists
+to provide, so such cases are dropped from the means and the paired tests
+instead. All 100 cases parsed in both orders for every arm in this run, so
+nothing was excluded here.
 
 So every arm has a vector of 100 case scores:
 
@@ -205,35 +221,36 @@ oracle." It does not prove that debate and oracle are exactly equal.
 
 ### Multiple-testing correction
 
-Because eight paired t-tests are run, the raw p-values are not the whole story.
+Because eight paired tests are run, the raw p-values are not the whole story.
 If many tests are run at once, at least one can look significant by chance.
 
-This bundle reports Holm-adjusted p-values in [`paired_tests.csv`](paired_tests.csv):
+Holm correction controls the family-wise error rate across a set of tests, and
+is less blunt than simple Bonferroni. [`paired_tests.csv`](paired_tests.csv)
+applies it to **both** p-values, in separate columns, so it is never ambiguous
+which test a given correction belongs to:
 
 ```text
-holm_p_all_8_tests
+holm_p_permutation_all      Holm over all 8 tests, applied to the permutation p
+holm_p_permutation_within   Holm within each set of 4, permutation p
+holm_p_ttest_all            Holm over all 8 tests, applied to the t-test p
+holm_p_ttest_within         Holm within each set of 4, t-test p
 ```
 
-Holm correction is a multiple-testing correction. It is less blunt than simple
-Bonferroni, but it controls the family-wise error rate across the set of tests.
-The public headline claim uses the stricter column that corrects across all
-eight tests.
+The "within" columns correct within each comparison type separately (four
+debate-vs-blind tests, four debate-vs-oracle tests). The "all" columns are the
+more conservative ones to cite.
 
-The file also includes:
+**Which one carries the claim.** The permutation test makes no normality
+assumption, so `holm_p_permutation_all` is the column to quote. Its values for
+the four debate-vs-blind arms are 4e-05 to 5e-05 — all still comfortably
+significant. That looks weaker than the t-test column only because the
+permutation p-value has a floor of about 5e-06 at 200,000 replicates, so any
+Holm adjustment of it cannot go below roughly 4e-05 however large the effect.
 
-```text
-holm_p_within_4_tests
-```
-
-That column corrects within each family of four tests separately:
-
-```text
-four debate-vs-blind tests
-four debate-vs-oracle tests
-```
-
-The all-eight correction is the more conservative one to cite for the main
-result.
+`n_tests_all` and `n_tests_within` record how many tests were actually in each
+correction family. On a complete run they are 8 and 4; on a partial run they
+report the real counts, so an incomplete analysis cannot be mistaken for a
+full one.
 
 ### Bootstrap confidence bounds
 
@@ -299,7 +316,7 @@ are usually fairly robust at n=100, but the bundle also reports a paired
 permutation test:
 
 ```text
-paired_permutation_p_two_sided
+p_permutation
 ```
 
 The permutation test asks: if debate had no real advantage on a case, what

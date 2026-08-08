@@ -171,10 +171,12 @@ python scripts/aggregate_medical_results.py \
 python scripts/compute_paired_tests.py \
   exp/YYYY-MM-DD_HH-MM-SS_results/openai \
   --baselines-dir data/canonical_baselines/openai \
-  --out-dir exp/YYYY-MM-DD_HH-MM-SS_results/medical_results \
-  --analysis-dir exp/YYYY-MM-DD_HH-MM-SS_results/openai/analysis
+  --out-dir exp/YYYY-MM-DD_HH-MM-SS_results/medical_results
 
-python scripts/summarise_run_costs.py exp/YYYY-MM-DD_HH-MM-SS_results/openai
+# Pass the baselines dir too, or fresh baseline spend is left out of the total.
+python scripts/summarise_run_costs.py \
+  exp/YYYY-MM-DD_HH-MM-SS_results/openai \
+  exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai
 
 python scripts/export_medical_debate_output.py \
   exp/YYYY-MM-DD_HH-MM-SS_results/openai \
@@ -202,8 +204,9 @@ that take it.
 | `scripts/analyze_medical_debate.py` | Produces verbosity, quote verification, concession, debate-outcome, and position-bias outputs. |
 | `scripts/aggregate_medical_results.py` | Produces accuracy, PGR, per-case lift tables, and result plots from cached judgement CSVs. |
 | `scripts/compute_paired_tests.py` | Produces `headline_results.csv`, `paired_tests.csv`, and `quality_control_summary.csv` — the curated-bundle statistics. |
+| `scripts/resolve_baselines.py` | Picks the baselines directory for a run, falling back to the committed canonical set. Called before any paid stage. |
 | `scripts/medical_stats.py` | Shared paired statistics (bootstrap, permutation, Holm) used by the two scripts above. Not a CLI. |
 | `scripts/plot_baselines.py` | Renders blind-vs-oracle and position-bias plots from a baselines `results.csv`. |
-| `scripts/summarise_run_costs.py` | Extracts API spend from Hydra logs into `cost_summary.csv`. |
+| `scripts/summarise_run_costs.py` | Extracts API spend from Hydra logs into `cost_summary.csv`. Takes several directories; pass the family dir and its baselines dir to cover a whole run. |
 | `scripts/export_medical_debate_output.py` | Writes a readable Markdown export of one debate and its judgements. |
 | `tests/test_accuracy.py` | Regression tests for parsing judge answers. |

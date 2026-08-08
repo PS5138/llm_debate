@@ -44,46 +44,64 @@ def _stage_for(log_path: Path) -> str:
     return log_path.stem
 
 
-def collect(exp_dir: Path) -> pd.DataFrame:
-    """One row per log file, holding that process's total spend.
+def collect(roots: list[Path]) -> pd.DataFrame:
+    """One row per log file across every root, holding that process's spend.
 
-    Columns: log, stage, cost_usd, snapshots, non_monotonic.
+    Columns: source_root, log, stage, cost_usd, snapshots, non_monotonic.
+
+    Several roots are accepted because a run's spend is not all under the
+    family directory: the blind and oracle baseline stages log under
+    `<run>/baselines/<family>/`. Summarising only the family dir silently
+    omits them, which matters whenever baselines were computed fresh rather
+    than reused from the committed canonical set.
     """
-    if not exp_dir.exists():
-        raise SystemExit(f"no such exp_dir: {exp_dir}")
+    missing = [r for r in roots if not r.exists()]
+    if missing and len(missing) == len(roots):
+        raise SystemExit(f"no such directory: {missing[0]}")
 
     rows: list[dict] = []
-    for log_path in sorted(exp_dir.rglob("*.log")):
-        try:
-            text = log_path.read_text(errors="ignore")
-        except OSError:
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
             continue
-        values = [float(m.group(1)) for m in _COST_RE.finditer(text)]
-        if not values:
-            continue
-        # A shared, never-reset counter should never decrease. If it does,
-        # this log mixes several handlers (or the adapter changed) and max()
-        # would under-count -- flag it rather than silently reporting a
-        # number we can no longer defend.
-        non_monotonic = any(b < a for a, b in zip(values, values[1:]))
-        rows.append(
-            {
-                "log": str(log_path.relative_to(exp_dir)),
-                "stage": _stage_for(log_path),
-                "cost_usd": max(values),
-                "snapshots": len(values),
-                "non_monotonic": non_monotonic,
-            }
-        )
+        for log_path in sorted(root.rglob("*.log")):
+            resolved = log_path.resolve()
+            # Roots may nest (e.g. a run root and its own family subdir), so
+            # guard against counting the same process twice.
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                text = log_path.read_text(errors="ignore")
+            except OSError:
+                continue
+            values = [float(m.group(1)) for m in _COST_RE.finditer(text)]
+            if not values:
+                continue
+            # A shared, never-reset counter should never decrease. If it does,
+            # this log mixes several handlers (or the adapter changed) and
+            # max() would under-count -- flag it rather than silently
+            # reporting a number we can no longer defend.
+            non_monotonic = any(b < a for a, b in zip(values, values[1:]))
+            rows.append(
+                {
+                    "source_root": str(root),
+                    "log": str(log_path.relative_to(root)),
+                    "stage": _stage_for(log_path),
+                    "cost_usd": max(values),
+                    "snapshots": len(values),
+                    "non_monotonic": non_monotonic,
+                }
+            )
     return pd.DataFrame(rows)
 
 
-def main(exp_dir: Path) -> None:
-    df = collect(exp_dir)
-    out_path = exp_dir / "cost_summary.csv"
+def main(roots: list[Path]) -> None:
+    df = collect(roots)
+    out_path = roots[0] / "cost_summary.csv"
     if df.empty:
-        out_path.write_text("log,stage,cost_usd,snapshots,non_monotonic\n")
-        print(f"no cost lines found under {exp_dir}/")
+        out_path.write_text("source_root,log,stage,cost_usd,snapshots,non_monotonic\n")
+        print(f"no cost lines found under {', '.join(str(r) for r in roots)}")
         return
 
     df.to_csv(out_path, index=False)
@@ -98,7 +116,15 @@ def main(exp_dir: Path) -> None:
     )
     print(per_stage.round(4).to_string())
     print()
-    print(f"Total spend across all logs in {exp_dir}: ${df['cost_usd'].sum():.4f}")
+    print("Per-root totals:")
+    print(df.groupby("source_root")["cost_usd"].sum().round(4).to_string())
+    print()
+    print(f"Total spend across all logs scanned: ${df['cost_usd'].sum():.4f}")
+    print(
+        "Note: this is what the adapters logged. The counter is snapshotted "
+        "when a debate or judgement completes, so calls billed after the "
+        "final snapshot in a process are not represented."
+    )
 
     flagged = df[df["non_monotonic"]]
     if not flagged.empty:
@@ -113,6 +139,13 @@ def main(exp_dir: Path) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("exp_dir", type=Path)
+    parser.add_argument(
+        "roots",
+        nargs="+",
+        type=Path,
+        help="One or more directories to scan for Hydra logs. "
+        "cost_summary.csv is written into the first one. Pass the family dir "
+        "and its baselines dir to cover a whole run.",
+    )
     args = parser.parse_args()
-    main(args.exp_dir)
+    main(args.roots)

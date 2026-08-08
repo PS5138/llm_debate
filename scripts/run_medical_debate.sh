@@ -42,6 +42,22 @@ fi
 EXP="${EXP_DIR}/${FAMILY}"
 CONCESSION_MODEL="${CONCESSION_MODEL:-gpt-4o-mini}"
 
+# Settle the baselines question BEFORE spending anything. PGR needs a
+# same-judge blind and oracle baseline for every debate arm; without one the
+# analysis stages at the end of this script cannot produce a headline table.
+# Resolving here means a missing baseline set costs nothing instead of a full
+# debate + judging run. Falls back to the committed canonical baselines when
+# the requested directory is absent or incomplete, which is what makes the
+# bare `./scripts/run_medical_debate.sh 1` smoke run work.
+echo ">>> Resolving baselines for ${FAMILY}"
+if ! RESOLVED_BASELINES_DIR="$("$PYTHON" scripts/resolve_baselines.py \
+      --family "${FAMILY}" --candidate "${BASELINES_DIR}")"; then
+  echo "" >&2
+  echo "Refusing to start: no usable baselines, and the debate stage costs money." >&2
+  exit 1
+fi
+BASELINES_DIR="${RESOLVED_BASELINES_DIR}"
+
 "$PYTHON" scripts/write_run_metadata.py \
   --run-root "${EXP_DIR}" \
   --family "${FAMILY}" \
@@ -126,13 +142,15 @@ fi
   --out-dir "${EXP_DIR}/medical_results"
 
 echo ">>> Computing paired significance tests + headline/QC tables (no API spend)"
+# No --analysis-dir: the script derives one per family dir, so a two-family
+# run produces a QC table covering both instead of the last family only.
 "$PYTHON" scripts/compute_paired_tests.py "${AGGREGATE_FAMILY_DIRS[@]}" \
   --baselines-dir "${AGGREGATE_BASELINES_DIR}" \
-  --out-dir "${EXP_DIR}/medical_results" \
-  --analysis-dir "${EXP}/analysis"
+  --out-dir "${EXP_DIR}/medical_results"
 
 echo ">>> Summarising API spend from logs"
-"$PYTHON" scripts/summarise_run_costs.py "${EXP}"
+# Both roots: baseline stages log under the baselines dir, not the family dir.
+"$PYTHON" scripts/summarise_run_costs.py "${EXP}" "${BASELINES_DIR}"
 
 "$PYTHON" scripts/export_medical_debate_output.py "${EXP}" --limit "${LIMIT}" --family "${FAMILY}"
 

@@ -274,12 +274,31 @@ def aligned_case_scores(
 
 
 def _swap_average(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse swap=False/True pairs into a single per-case accuracy."""
+    """Collapse swap=False/True pairs into a single per-case accuracy.
+
+    A case only gets a score when BOTH judging passes parsed. `mean()` skips
+    NaN, so a case whose swapped pass was unparseable would otherwise be
+    scored off the surviving pass alone — a single correct pass would read
+    1.0, indistinguishable from a case the judge got right in both orders.
+    That silently bypasses the position-bias control that swap judging exists
+    to provide, and it inflates accuracy.
+
+    Such cases are scored NaN so they drop out of the means and paired tests
+    rather than counting as clean wins. `n_parsed` records how many passes
+    actually parsed, so the shortfall is visible in the CSV instead of being
+    hidden behind `n_passes`, which counts rows present rather than usable.
+    """
+    group_cols = [c for c in df.columns if c not in {"swap", "correct"}]
     grouped = (
-        df.groupby([c for c in df.columns if c not in {"swap", "correct"}])
-        .agg(acc=("correct", "mean"), n_passes=("correct", "size"))
+        df.groupby(group_cols)
+        .agg(
+            acc=("correct", "mean"),
+            n_passes=("correct", "size"),
+            n_parsed=("correct", "count"),
+        )
         .reset_index()
     )
+    grouped.loc[grouped["n_parsed"] < 2, "acc"] = float("nan")
     return grouped
 
 

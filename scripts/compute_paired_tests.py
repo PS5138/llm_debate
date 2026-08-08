@@ -61,18 +61,26 @@ _CONDITION_LABELS = {
 def build_tables(
     per_case: pd.DataFrame,
     baselines_case: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (headline_results, paired_tests).
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Return (headline_results, paired_tests, skipped).
+
+    `skipped` names every (family, condition, judge) that could not be scored
+    because it had no same-judge blind and oracle baseline. Callers are
+    expected to surface it: a partial run that silently drops half its
+    conditions looks indistinguishable from a complete one.
 
     Holm correction is applied per family over that family's whole set of
-    tests, and separately within each comparison type. With the standard four
-    conditions those are the 8- and 4-test families the column names describe.
+    tests, and separately within each comparison type. Both the t-test and the
+    permutation p-values are corrected, in separate columns, and the number of
+    tests in each correction family is recorded alongside — the counts are
+    data rather than something to infer from a column name.
     """
     if per_case.empty or baselines_case.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), []
 
     headline_rows: list[dict] = []
     test_rows: list[dict] = []
+    skipped: list[str] = []
 
     for family in sorted(per_case["family"].unique()):
         fam = per_case[per_case["family"] == family]
@@ -84,6 +92,7 @@ def build_tables(
                     per_case, baselines_case, family, condition, judge
                 )
                 if arms is None:
+                    skipped.append(f"{family}/{condition} (judge {judge})")
                     continue
                 debate, blind, oracle = arms
                 label = _CONDITION_LABELS.get(condition, condition)
@@ -123,8 +132,8 @@ def build_tables(
                     mean_diff, ci_lo, ci_hi = medical_stats.paired_mean_diff_ci(
                         debate, reference
                     )
-                    t_stat, raw_p = medical_stats.paired_t_test(debate, reference)
-                    perm_p = medical_stats.paired_permutation_p(debate, reference)
+                    t_stat, p_ttest = medical_stats.paired_t_test(debate, reference)
+                    p_perm = medical_stats.paired_permutation_p(debate, reference)
                     diffs = debate - reference
                     test_rows.append(
                         {
@@ -137,31 +146,54 @@ def build_tables(
                             "mean_diff": mean_diff,
                             "bootstrap_ci_lo": ci_lo,
                             "bootstrap_ci_hi": ci_hi,
-                            "t_statistic": t_stat,
-                            "raw_p": raw_p,
-                            "paired_permutation_p_two_sided": perm_p,
                             "nonzero_pairs": int((diffs != 0).sum()),
+                            "t_statistic": t_stat,
+                            "p_ttest": p_ttest,
+                            "p_permutation": p_perm,
                         }
                     )
 
     headline = pd.DataFrame(headline_rows)
     tests = pd.DataFrame(test_rows)
     if tests.empty:
-        return headline, tests
+        return headline, tests, skipped
 
     # Holm across every test in the family, then within each comparison type.
-    tests["holm_p_all_8_tests"] = float("nan")
-    tests["holm_p_within_4_tests"] = float("nan")
-    for family, grp in tests.groupby("family"):
+    # Both p-values are corrected: the permutation test is the one the
+    # methodology says carries the claim, so leaving it unadjusted while
+    # publishing an adjusted t-test p invites the reader to attribute the
+    # correction to the wrong test.
+    for col in (
+        "holm_p_ttest_all",
+        "holm_p_ttest_within",
+        "holm_p_permutation_all",
+        "holm_p_permutation_within",
+        "n_tests_all",
+        "n_tests_within",
+    ):
+        tests[col] = float("nan")
+
+    for _, grp in tests.groupby("family"):
         idx = grp.index.tolist()
-        tests.loc[idx, "holm_p_all_8_tests"] = medical_stats.holm(grp["raw_p"].tolist())
+        tests.loc[idx, "holm_p_ttest_all"] = medical_stats.holm(grp["p_ttest"].tolist())
+        tests.loc[idx, "holm_p_permutation_all"] = medical_stats.holm(
+            grp["p_permutation"].tolist()
+        )
+        tests.loc[idx, "n_tests_all"] = len(idx)
         for _, sub in grp.groupby("comparison"):
             sub_idx = sub.index.tolist()
-            tests.loc[sub_idx, "holm_p_within_4_tests"] = medical_stats.holm(
-                sub["raw_p"].tolist()
+            tests.loc[sub_idx, "holm_p_ttest_within"] = medical_stats.holm(
+                sub["p_ttest"].tolist()
             )
+            tests.loc[sub_idx, "holm_p_permutation_within"] = medical_stats.holm(
+                sub["p_permutation"].tolist()
+            )
+            tests.loc[sub_idx, "n_tests_within"] = len(sub_idx)
 
-    return headline, tests
+    for col in ("n_tests_all", "n_tests_within"):
+        tests[col] = tests[col].astype(int)
+
+    return headline, tests, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -169,13 +201,17 @@ def build_tables(
 # ---------------------------------------------------------------------------
 
 
-def build_quality_control(analysis_dir: Path) -> pd.DataFrame:
-    """Consolidate the `analysis/` QC tables into one long table.
+def build_quality_control(analysis_dir: Path, family: str) -> pd.DataFrame:
+    """Consolidate one family's `analysis/` QC tables into one long table.
 
     Every number here already exists in `analysis/`; this only gathers the
     ones the write-ups quote so a reader does not have to open four files.
     Missing inputs are skipped rather than fatal — a partial run still gets a
     partial QC table.
+
+    Rows carry `family` because a shared `medical_results/` directory holds
+    every family in the run. Without it a second family's pass would overwrite
+    the first's QC summary rather than extend it.
     """
     rows: list[dict] = []
 
@@ -187,6 +223,7 @@ def build_quality_control(analysis_dir: Path) -> pd.DataFrame:
             verified = int(grp["n_verified"].sum())
             rows.append(
                 {
+                    "family": family,
                     "metric": f"quote_verification_{side}",
                     "value": (verified / total) if total else float("nan"),
                     "numerator": verified,
@@ -201,6 +238,7 @@ def build_quality_control(analysis_dir: Path) -> pd.DataFrame:
         for side, grp in df.groupby("side"):
             rows.append(
                 {
+                    "family": family,
                     "metric": f"avg_words_per_turn_{side}",
                     "value": float(grp["words"].mean()),
                     "numerator": "",
@@ -215,6 +253,7 @@ def build_quality_control(analysis_dir: Path) -> pd.DataFrame:
         for _, r in df.iterrows():
             rows.append(
                 {
+                    "family": family,
                     "metric": f"debate_outcome_{r['status']}",
                     "value": float(r["count"]),
                     "numerator": "",
@@ -229,6 +268,7 @@ def build_quality_control(analysis_dir: Path) -> pd.DataFrame:
         for _, r in df.iterrows():
             rows.append(
                 {
+                    "family": family,
                     "metric": f"position_bias_pct_{r['stage']}_{r['arm']}_{r['judge_model']}",
                     "value": float(r["pos_bias_total_pct"]),
                     "numerator": int(r["pos_bias_total"]),
@@ -245,6 +285,46 @@ def build_quality_control(analysis_dir: Path) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _write_quality_control(
+    family_dirs: list[Path],
+    out_dir: Path,
+    analysis_dir: Optional[Path],
+) -> None:
+    """Build the QC rollup for every family in the run, in one table.
+
+    Each family's analysis directory is derived from its own family dir, so a
+    two-family run gets both. `--analysis-dir` overrides that, but only when a
+    single family dir was given: pointing every family at one analysis folder
+    would silently mislabel the rows.
+    """
+    frames: list[pd.DataFrame] = []
+    for family_dir in family_dirs:
+        family = _family_label_from_path(family_dir)
+        if analysis_dir is not None and len(family_dirs) == 1:
+            candidate = analysis_dir
+        else:
+            candidate = family_dir / "analysis"
+        if not candidate.exists():
+            print(f"no analysis dir for {family} at {candidate} — QC skipped")
+            continue
+        qc = build_quality_control(candidate, family)
+        if qc.empty:
+            print(f"no QC inputs under {candidate}/ — QC skipped for {family}")
+        else:
+            frames.append(qc)
+
+    if not frames:
+        print("quality_control_summary.csv skipped — no QC inputs found")
+        return
+    combined = pd.concat(frames, ignore_index=True)
+    combined.to_csv(out_dir / "quality_control_summary.csv", index=False)
+    families = ", ".join(sorted(combined["family"].unique()))
+    print(
+        f"wrote {out_dir}/quality_control_summary.csv "
+        f"({len(combined)} rows; families: {families})"
+    )
+
+
 def main(
     family_dirs: list[Path],
     baselines_dir: Optional[Path],
@@ -254,41 +334,59 @@ def main(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     per_case, baselines_case = load_per_case_scores(family_dirs, baselines_dir)
-    if per_case.empty:
-        raise SystemExit(
-            "no debate judgement CSVs found — run the debate + judging stages first"
-        )
-    if baselines_case.empty:
-        raise SystemExit(
-            "no baseline judgement CSVs found — pass --baselines-dir pointing at "
-            "a baselines folder (or data/canonical_baselines)"
-        )
 
-    headline, tests = build_tables(per_case, baselines_case)
-    if headline.empty:
-        raise SystemExit(
-            "no condition had all three of debate / blind / oracle for one judge; "
-            "check that the baselines cover the judge models used by the debate arms"
+    # These stages are non-fatal by design. This script runs late in
+    # `run_medical_debate.sh`, after the debate and judging stages have already
+    # been paid for, and `set -e` means a nonzero exit here would skip the cost
+    # summary and the transcript export. The neighbouring aggregation stage
+    # tolerates the same missing inputs, so this one matches that contract:
+    # explain loudly, write what can be written, and leave the pipeline running.
+    if per_case.empty:
+        print(
+            "WARNING: no debate judgement CSVs found — run the debate and "
+            "judging stages first. Skipping paired tests.",
+            file=sys.stderr,
         )
+        return
+    if baselines_case.empty:
+        print(
+            "WARNING: no baseline judgement CSVs found under the given "
+            "--baselines-dir, so PGR and the paired tests cannot be computed. "
+            "Point --baselines-dir at a baselines folder (or "
+            "data/canonical_baselines). Skipping paired tests.",
+            file=sys.stderr,
+        )
+        _write_quality_control(family_dirs, out_dir, analysis_dir)
+        return
+
+    headline, tests, skipped = build_tables(per_case, baselines_case)
+
+    if skipped:
+        print(
+            "WARNING: no same-judge blind+oracle baseline for "
+            f"{len(skipped)} condition(s), so they are absent from the tables "
+            "below. This run is INCOMPLETE:",
+            file=sys.stderr,
+        )
+        for item in skipped:
+            print(f"  - {item}", file=sys.stderr)
+
+    if headline.empty:
+        print(
+            "WARNING: no condition had all three of debate / blind / oracle "
+            "for one judge — check that the baselines cover the judge models "
+            "used by the debate arms. Skipping paired tests.",
+            file=sys.stderr,
+        )
+        _write_quality_control(family_dirs, out_dir, analysis_dir)
+        return
 
     headline.to_csv(out_dir / "headline_results.csv", index=False)
     tests.to_csv(out_dir / "paired_tests.csv", index=False)
     print(f"wrote {out_dir}/headline_results.csv  ({len(headline)} rows)")
     print(f"wrote {out_dir}/paired_tests.csv      ({len(tests)} rows)")
 
-    resolved_analysis = analysis_dir
-    if resolved_analysis is None and len(family_dirs) == 1:
-        candidate = family_dirs[0] / "analysis"
-        resolved_analysis = candidate if candidate.exists() else None
-    if resolved_analysis is not None:
-        qc = build_quality_control(resolved_analysis)
-        if qc.empty:
-            print(f"no QC inputs found under {resolved_analysis}/ — skipped")
-        else:
-            qc.to_csv(out_dir / "quality_control_summary.csv", index=False)
-            print(f"wrote {out_dir}/quality_control_summary.csv ({len(qc)} rows)")
-    else:
-        print("quality_control_summary.csv skipped — pass --analysis-dir")
+    _write_quality_control(family_dirs, out_dir, analysis_dir)
 
     print()
     print("Headline (accuracy / PGR):")
@@ -297,14 +395,15 @@ def main(
     ]
     print(show.to_string(index=False))
     print()
-    print("Paired tests:")
+    print("Paired tests (Holm across all tests in the family):")
     show = tests[
         [
             "label",
             "comparison",
             "mean_diff",
-            "paired_permutation_p_two_sided",
-            "holm_p_all_8_tests",
+            "p_permutation",
+            "holm_p_permutation_all",
+            "holm_p_ttest_all",
         ]
     ]
     print(show.to_string(index=False))
