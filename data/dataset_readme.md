@@ -4,6 +4,11 @@ This fork uses a 100-case pilot derived from **DDXPlus**, a public synthetic
 differential-diagnosis dataset. It no longer ships the original QuALITY human
 feedback or LLM debate datasets from the upstream repository.
 
+> **Research use only.** DDXPlus contains synthetic patients and its authors
+> state that it is intended for research. This pilot is not clinical data,
+> medical advice, or a diagnostic tool and must not be used for real-patient
+> decisions.
+
 ## Committed Files
 
 - `data/ddxplus/ddxplus_debate_pilot_100.csv`
@@ -26,7 +31,12 @@ tracked in Git:
 
 ## Source
 
-The DDXPlus files come from the public dataset released with:
+Download the official release from
+[DDXPlus on Figshare](https://figshare.com/articles/dataset/DDXPlus_Dataset/20043374).
+The dataset is released under the
+[Creative Commons Attribution 4.0 licence](https://creativecommons.org/licenses/by/4.0/),
+so reuse requires appropriate attribution. The accompanying paper and dataset
+documentation should be cited:
 
 ```bibtex
 @inproceedings{tchango2022ddxplus,
@@ -37,11 +47,23 @@ The DDXPlus files come from the public dataset released with:
 }
 ```
 
-The prepared pilot can be rebuilt with:
+To rebuild the committed pilot locally:
+
+1. Download and extract the DDXPlus release from Figshare.
+2. Place the test-patient file at
+   `data/ddxplus/release_test_patients`. The committed evidence and condition
+   definition files must remain at
+   `data/ddxplus/release_evidences.json` and
+   `data/ddxplus/release_conditions.json`.
+3. From the repository root, run the no-API preparation utility:
 
 ```bash
 python scripts/prepare_ddxplus_debate_pilot.py
 ```
+
+This command only prepares data; it does not launch provider calls. Normal app
+users do not need the raw release because the prepared 100-case CSV is already
+committed.
 
 ## How The 100 Cases Are Chosen
 
@@ -62,8 +84,8 @@ The pilot is deterministic, not a simple random sample. The preparation script:
    - then source row order.
 8. Selects cases in a round-robin over pathologies so the 100-case pilot is not
    dominated by one condition.
-9. Randomizes whether the true diagnosis appears as diagnosis A or diagnosis B
-   using a fixed seed (`20260504`), so the output is reproducible.
+9. Writes auxiliary randomized `diagnosis_a`, `diagnosis_b`, and
+   `correct_answer` columns using fixed seed `20260504`.
 
 This means the pilot intentionally emphasizes difficult two-choice cases where
 the distractor is plausible according to DDXPlus, rather than easy random cases.
@@ -75,9 +97,11 @@ the distractor is plausible according to DDXPlus, rather than easy random cases.
 - `case_id`: Stable pilot identifier such as `ddxplus_pilot_001`.
 - `source_row_id`: Row index in the raw DDXPlus test-patient file.
 - `question_stem`: Short patient-facing question used in prompts.
-- `diagnosis_a`, `diagnosis_b`: The two answer choices in randomized order.
+- `diagnosis_a`, `diagnosis_b`: Auxiliary answer choices in seeded randomized
+  order. The current experiment loader does not consume these columns.
 - `evidence`: Decoded structured patient evidence.
-- `correct_answer`: `diagnosis_a` or `diagnosis_b`.
+- `correct_answer`: Auxiliary label for the randomized prepared-CSV columns;
+  not consumed by the current experiment loader.
 - `pathology`: The true DDXPlus pathology.
 - `top_differential`: The selected plausible distractor.
 - `pathology_probability`, `top_differential_probability`: DDXPlus
@@ -90,7 +114,13 @@ the distractor is plausible according to DDXPlus, rather than easy random cases.
 
 The pipeline does not run directly on `ddxplus_debate_pilot_100.csv`. Instead,
 `core/load/medical.py` converts it into the internal experiment schema expected
-by the inherited debate machinery. For example, a blind baseline run writes:
+by the inherited debate machinery. It reconstructs internal A as the true
+`pathology` and internal B as `top_differential`; position control comes from
+the later original and A/B-swapped judgement passes, not the auxiliary
+randomized columns above.
+
+When baseline recomputation is selected in the Streamlit app, a blind arm can
+write:
 
 ```text
 exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai/baseline_blind/data0.csv
@@ -99,9 +129,8 @@ exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai/baseline_blind/data0.csv
 That file is an experiment working file, not a final result table. It contains
 the question, internal correct/negative answer columns, patient evidence in the
 `story` column, an initially empty `transcript` column, and a `complete` flag.
-After `core.debate` runs, `data0.csv` has completed baseline/debate transcripts.
-After `core.judge` runs, judgement CSVs are written under the judge-model
-subdirectory, for example:
+The app's internal debate stage fills `data0.csv`; its judgement stage writes
+CSV files under the judge-model subdirectory, for example:
 
 ```text
 exp/YYYY-MM-DD_HH-MM-SS_results/baselines/openai/baseline_blind/gpt-5.4-mini/data0_judgement.csv

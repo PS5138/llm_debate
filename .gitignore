@@ -106,8 +106,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments and local credentials
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -133,7 +135,11 @@ dmypy.json
 # Pyre type checker
 .pyre/
 SECRETS
+SECRETS.*
 PROD_SECRETS
+PROD_SECRETS.*
+.streamlit/secrets.toml
+.streamlit/secrets.*.toml
 .DS_Store
 exp/
 pyrightconfig.json

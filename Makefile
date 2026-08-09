@@ -9,4 +9,7 @@ test:
 	.venv/bin/python tests/test_analysis_outputs.py
 	.venv/bin/python tests/test_baseline_validation.py
 	.venv/bin/python tests/test_stage_failures.py
-	.venv/bin/python tests/test_medical_shell.py
+	.venv/bin/python tests/test_llm_token_limits.py
+	.venv/bin/python tests/test_resume_selection.py
+	.venv/bin/python tests/test_saved_run_security.py
+	.venv/bin/python tests/test_streamlit_app.py

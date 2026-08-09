@@ -6,12 +6,18 @@ controls, and output schemas live so the README itself can stay short.
 
 ## Dataset preparation
 
-The committed pilot is `data/ddxplus/ddxplus_debate_pilot_100.csv` and can be
-rebuilt from local DDXPlus release files with:
+The committed pilot is `data/ddxplus/ddxplus_debate_pilot_100.csv`. Maintainers
+can rebuild it, without model calls, from a locally downloaded DDXPlus release:
 
 ```bash
 python scripts/prepare_ddxplus_debate_pilot.py
 ```
+
+The required filenames, official download page, CC BY 4.0 licence, and
+extraction steps are documented in
+[`../data/dataset_readme.md`](../data/dataset_readme.md). This preparation
+utility is not an experiment launcher; users running the app use the committed
+pilot as-is.
 
 The 100 cases are not a simple random sample. The preparation script:
 
@@ -27,13 +33,18 @@ The 100 cases are not a simple random sample. The preparation script:
    source row order.
 8. Selects cases round-robin across pathologies so the pilot is not dominated
    by one condition.
-9. Randomizes whether the true diagnosis appears as diagnosis A or diagnosis B
-   with fixed seed `20260504`.
+9. Writes auxiliary `diagnosis_a`, `diagnosis_b`, and `correct_answer` columns
+   using fixed seed `20260504`. The current experiment loader does **not** use
+   those randomized columns: it maps the true pathology to internal A and the
+   distractor to internal B, then the judging stage evaluates both that order
+   and its A/B swap.
 
 This deliberately emphasizes difficult two-choice cases where the distractor
 is plausible according to DDXPlus. The raw DDXPlus patient release files are
 not redistributed through this repository; generated experiment outputs are
-also excluded from Git.
+also excluded from Git. DDXPlus is synthetic, released under CC BY 4.0, and its
+authors specify research use. Neither the dataset nor this experiment should be
+used directly for clinical diagnosis or real-patient decisions.
 
 ## Baseline runs in detail
 
@@ -44,7 +55,8 @@ rather than recomputed each time. The frontend reads from this folder by
 default; flip "Recompute baselines" in the sidebar to force a fresh per-run
 pass over both judges. See
 [`data/canonical_baselines/README.md`](../data/canonical_baselines/README.md)
-for the regeneration command and when to use it.
+for the controlled replacement procedure and when it is necessary. The app
+never writes directly into a committed canonical folder.
 
 A baseline run creates the following, **once per judge** (canonical folders
 carry both the weaker and the frontier judge so every debate arm has a
@@ -150,14 +162,9 @@ The pipeline emits the following diagnostics per family run:
   debater appears to concede or argue for the other answer.
 - **Debate outcome counts.** `analysis/debate_outcomes.csv` reports
   usable / conceded / incomplete / unparsed debates.
-- **Cost summaries.** `cost_summary.csv` extracts API spend from the Hydra
-  logs, one row per log file. The adapters log a *cumulative* running total
-  per process, so each file's spend is the maximum of its snapshots and the
-  run total is the sum of those maxima; summing the raw log lines
-  over-counts several-fold.
-
-Each CSV is accompanied by a `*_summary.txt` with a short human-readable
-explanation, and most have a matching PNG under `analysis/plots/`.
+The five analysis CSVs listed above are accompanied by matching
+`*_summary.txt` files. Most also have a PNG under `analysis/plots/`; aggregate
+and statistical CSVs do not each receive a text summary.
 
 ## Sampling and token settings
 
@@ -177,7 +184,7 @@ families, but the API adapters normalize them where providers differ.
 - **Blind/oracle baselines and E1-E4 final judges:** `temperature=0.0`,
   `top_p=1.0`, and `max_tokens=null`. OpenAI receives no explicit output cap
   when the cap is `null`; Anthropic receives the shared wrapper default of
-  `2000` output tokens.
+  `8192` output tokens.
 - **Concession judge:** `gpt-4o-mini`, `temperature=0.0`, `top_p=1.0`,
   `max_tokens=1`. This is only a Y/N quality-control pass, not a diagnosis
   judge.
@@ -196,13 +203,13 @@ Provider-specific differences:
 
 ## Expected outputs
 
-For a run such as `./scripts/run_medical_full.sh 100 openai`, the main
-outputs are:
+For a 100-case OpenAI run launched through the Streamlit app, the main outputs
+are:
 
 ```text
 exp/YYYY-MM-DD_HH-MM-SS_results/
   run_metadata.json
-  baselines/openai/
+  baselines/openai/                 # only when recomputation was selected
     baseline_blind/
     baseline_oracle/
     results.csv
@@ -222,8 +229,6 @@ exp/YYYY-MM-DD_HH-MM-SS_results/
       debate_outcomes.csv
       position_bias.csv
       plots/
-    cost_summary.csv
-    one_debate_outputs.md
   medical_results/
     accuracy_by_condition.csv
     per_case_lift.csv
@@ -243,11 +248,19 @@ run will be curated under `../results/anthropic_100/` in the same shape
 (`headline_results.csv`, `paired_tests.csv`, `baselines_by_arm.csv`,
 `analysis/`, and the plot set) so the two bundles share a column schema.
 
-Every file in a curated bundle is script-generated. Regenerating one needs that
-run's judgement CSVs under `exp/`, which is gitignored — so a fresh clone must
-run the debate and judging stages before it can rebuild the tables. The
-analysis layer adds no API cost on top of that, and the committed canonical
-baselines mean the blind and oracle arms never have to be re-run at all.
+The headline tables and plots are deterministic functions of a run's completed
+judgement CSVs. A curated release also includes selected QC analysis artifacts
+and sanitized metadata copied from that source run. The raw judgement CSVs,
+transcripts, caches, and logs remain under gitignored `exp/`, so a fresh clone
+can inspect and validate the committed bundle but cannot reconstruct every file
+from raw source data.
+
+Launching the app again produces a new paid replication, not a byte-for-byte
+rebuild: model generation is stochastic even when the visible configuration is
+the same. Given the original cached judgements, the no-API analysis utilities
+can deterministically recompute their respective tables and figures, but there
+is no single public command that recreates the entire curated folder from a
+fresh clone.
 
 ## Paired statistics
 

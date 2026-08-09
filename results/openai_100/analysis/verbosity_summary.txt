@@ -1,14 +1,14 @@
-Verbosity — total words per debate, per side.
+Verbosity — words per argument turn, grouped by assigned side.
 
-Per-side word counts across rounds (averaged over cases):
+Per-turn word counts across rounds and cases:
             mean  min  max
-side                      
+side
 correct    134.2  114  150
 incorrect  135.4  115  150
 
 Per-case totals:
 side               correct  incorrect  delta_correct_minus_incorrect
-case_id                                                             
+case_id
 ddxplus_pilot_001      384        395                            -11
 ddxplus_pilot_002      415        417                             -2
 ddxplus_pilot_003      404        419                            -15
@@ -112,5 +112,3 @@ ddxplus_pilot_100      407        409                             -2
 
 Interpretation: a large persistent gap between correct- and
 incorrect-side word counts would be a verbosity-bias risk.
-Pearson r between argument length and judge wins becomes
-meaningful at N >= 20.

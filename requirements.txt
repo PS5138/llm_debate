@@ -16,4 +16,4 @@ tabulate
 tenacity
 termcolor
 tiktoken
-typer[all]
+typer

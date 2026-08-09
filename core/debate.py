@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +21,50 @@ from core.utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+APP_RUNNER_ENV = "MEDICAL_DEBATE_APP_RUNNER"
+
+
+def _require_app_runner() -> None:
+    """Refuse direct paid-stage execution outside the Streamlit runner.
+
+    This is a product guardrail, not an authentication boundary: the marker is
+    deliberately just an environment variable set by ``app.runner`` for the
+    subprocesses it owns.  It prevents the old, unsupported ``python -m``
+    workflow from accidentally bypassing the app's cost confirmation and
+    resume checks.
+    """
+    if os.environ.get(APP_RUNNER_ENV) != "1":
+        raise RuntimeError(
+            "Direct debate execution is unsupported. Start the Streamlit app "
+            "and run the experiment there."
+        )
+
+
+def _atomic_write_csv(df: pd.DataFrame, filename: Path) -> None:
+    """Replace ``filename`` atomically with a complete CSV snapshot."""
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{filename.name}.",
+            suffix=".tmp",
+            dir=filename.parent,
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            df.to_csv(tmp, index=False)
+        tmp_path.replace(filename)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def _completed_mask(series: pd.Series) -> pd.Series:
+    """Normalise booleans reloaded from partially populated CSV columns."""
+    return series.astype(str).str.strip().str.lower().eq("true")
 
 
 async def load_dataset(cfg: DictConfig, filename: Path):
@@ -41,15 +87,16 @@ async def run_debates(
     limit: int = None,
     num_debate_threads: int = 20,
 ):
-    # load dataset
+    # Load the whole working dataset. ``limit`` selects the target cohort but
+    # must never truncate rows already present in a resumable CSV.
     full_df = pd.read_csv(filename, encoding="utf-8", keep_default_na=False)
-    if limit is not None:
-        full_df = full_df.head(int(limit))
     if "complete" not in full_df.columns:
         full_df["complete"] = False
     if "transcript" not in full_df.columns:
         full_df["transcript"] = ""
-    df = full_df[full_df["complete"] == False]
+    target_df = full_df.head(int(limit)) if limit is not None else full_df
+    target_indices = target_df.index
+    df = target_df[~_completed_mask(target_df["complete"])]
 
     start_time = datetime.now()
     LOGGER.info(f"Processing {filename}")
@@ -58,38 +105,41 @@ async def run_debates(
 
     async def bounded_run(sem, index, row, swap):
         async with sem:
-            return await rollout.run(index, row, swap=swap)
+            try:
+                result = await rollout.run(index, row, swap=swap)
+                # There is deliberately no ``await`` between receiving the
+                # paid response and replacing the CSV. All coroutines share
+                # this event-loop thread, so these synchronous updates form a
+                # single-writer sequence without competing dataframe writes.
+                full_df.at[index, "transcript"] = result["transcript"]
+                full_df.at[index, "complete"] = bool(result["complete"])
+                _atomic_write_csv(full_df, filename)
+                return bool(result["complete"])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One malformed/erroring case must not discard successfully
+                # persisted siblings from the same asynchronous batch.
+                LOGGER.exception("Debate case %s failed", index)
+                return False
 
     sem = asyncio.Semaphore(num_debate_threads)
     tasks = [bounded_run(sem, index, row, swap) for index, row in df.iterrows()]
     results = await asyncio.gather(*tasks)
-    correct = sum([bool(result["complete"]) for result in results])
+    correct = sum(results)
     LOGGER.info(f"Processed {len(results)} rows. {correct}  were complete.")
-
-    # Update dataframe
-    df.update(
-        pd.DataFrame(
-            {
-                "transcript": [result["transcript"] for result in results],
-                "complete": [result["complete"] for result in results],
-            },
-            index=df.index,
-        )
-    )
-    full_df.update(df)
-
-    # save results
-    full_df.to_csv(filename, index=False, encoding="utf-8")
     LOGGER.info(f"Time taken: {datetime.now() - start_time}")
 
     # `correct` is how many of this attempt's incomplete rows finished. The
     # retry loop uses it to tell a partial failure worth retrying from a total
     # one that would just re-bill the same failing calls.
-    return bool(full_df["complete"].eq(True).all()), int(correct)
+    target_complete = _completed_mask(full_df.loc[target_indices, "complete"]).all()
+    return bool(target_complete), int(correct)
 
 
 @hydra.main(version_base=None, config_path="config/", config_name="config")
 def main(cfg: DictConfig):
+    _require_app_runner()
     complete = asyncio.run(async_main(cfg))
     if not complete:
         raise RuntimeError(
@@ -145,9 +195,9 @@ async def async_main(cfg: DictConfig):
     #
     # This must stay an int >= 1. True division returned a float, and
     # `asyncio.Semaphore(1.25)` does not limit concurrency to one — it lets
-    # every waiting task straight through, so a CLI run with the default
-    # THREADS=5 and BoN=4 issued unbounded concurrent requests instead of the
-    # single case the heuristic intended.
+    # every waiting task straight through, so a stage given a thread budget of
+    # 5 with BoN=4 issued unbounded concurrent requests instead of the single
+    # case the heuristic intended.
     _BoN_correct = cfg.correct_debater.BoN
     _BoN_incorrect = cfg.incorrect_debater.BoN
     num_debate_threads = max(

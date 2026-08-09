@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import random
+import tempfile
 from enum import StrEnum
 from pathlib import Path
 from shutil import copyfile
@@ -13,6 +15,7 @@ from core.agents.judge_base import JudgeBase
 from core.create_agents import setup_judge
 from core.file_handler import Experiment
 from core.llm_api.llm import ModelAPI
+from core.scoring.accuracy import find_answer
 from core.utils import (
     async_function_with_retry,
     delete_old_prompt_files,
@@ -20,6 +23,58 @@ from core.utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+APP_RUNNER_ENV = "MEDICAL_DEBATE_APP_RUNNER"
+
+
+def _require_app_runner() -> None:
+    """Refuse direct paid-stage execution outside the Streamlit runner."""
+    if os.environ.get(APP_RUNNER_ENV) != "1":
+        raise RuntimeError(
+            "Direct judge execution is unsupported. Start the Streamlit app "
+            "and run the experiment there."
+        )
+
+
+def _atomic_write_csv(df: pd.DataFrame, filename: Path) -> None:
+    """Replace ``filename`` atomically with a complete CSV snapshot."""
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            prefix=f".{filename.name}.",
+            suffix=".tmp",
+            dir=filename.parent,
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            df.to_csv(tmp, index=False)
+        tmp_path.replace(filename)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def _completed_mask(series: pd.Series) -> pd.Series:
+    """Normalise booleans reloaded from partially populated CSV columns."""
+    return series.astype(str).str.strip().str.lower().eq("true")
+
+
+def _parseable_ab_judgement(value: object) -> bool:
+    """Whether the production answer parser finds exactly one final A/B.
+
+    Final answer judges must not checkpoint a truncated or ambiguous response
+    as complete: resume relies on ``complete_judge=False`` to know that the API
+    call needs retrying. Concession judgements use Y/N and are deliberately
+    exempted by ``run_judge`` rather than being passed to this helper.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    found_a = bool(find_answer(value, "A"))
+    found_b = bool(find_answer(value, "B"))
+    return found_a != found_b
 
 
 class JudgeType(StrEnum):
@@ -31,17 +86,11 @@ def _reconcile_judgement_with_data(data_csv: Path, judgement_csv: Path) -> None:
     """Bring a pre-existing judgement CSV back into agreement with the
     debate-stage `data*.csv` it was originally seeded from.
 
-    Two cases need to be handled when a previous run is resumed or
-    extended:
-      * The data CSV has gained rows the judgement CSV doesn't know
-        about (e.g. the app extended the working files from 5 to 10
-        cases). Append the new rows with empty judge columns so the
-        judge stage can process them.
-      * The data CSV has updated `complete` or `transcript` for rows
-        the judgement CSV already has (e.g. debate just ran and filled
-        in transcripts). Copy those columns across so the assertion
-        in `run_judge` ("debate must be done before judging") passes
-        and the judge sees the correct transcript text.
+    Reconciliation is strictly case-ID keyed. The data CSV owns row order,
+    ``complete``, and ``transcript``; the judgement CSV owns judge answers and
+    judge completion flags. Existing judge outputs follow their case ID even
+    if the judgement CSV was reordered, while data IDs missing from the
+    judgement CSV are appended in data order with empty judge state.
 
     `answer_judge`, `complete_judge`, and any other judge-stage output
     columns are preserved on rows that already had them — this is the
@@ -49,28 +98,94 @@ def _reconcile_judgement_with_data(data_csv: Path, judgement_csv: Path) -> None:
     """
     if not data_csv.exists() or not judgement_csv.exists():
         return
-    data_df = pd.read_csv(data_csv, keep_default_na=False)
-    j_df = pd.read_csv(judgement_csv, keep_default_na=False)
+    # IDs are opaque strings. Reading the whole CSV as text prevents pandas
+    # from silently collapsing distinct-looking identifiers such as ``001``
+    # and ``1`` before we validate or join them.
+    data_df = pd.read_csv(data_csv, keep_default_na=False, dtype=str)
+    j_df = pd.read_csv(judgement_csv, keep_default_na=False, dtype=str)
 
-    # Append any rows the judgement CSV is missing.
-    if len(data_df) > len(j_df):
-        new_rows = data_df.iloc[len(j_df) :].copy()
-        for col in j_df.columns:
-            if col not in new_rows.columns:
-                if col.startswith("complete"):
-                    new_rows[col] = False
+    def _validated_ids(df: pd.DataFrame, label: str) -> tuple[str, pd.Series]:
+        id_column = (
+            "id"
+            if "id" in df.columns
+            else "case_id"
+            if "case_id" in df.columns
+            else None
+        )
+        if id_column is None:
+            raise ValueError(f"{label} CSV is missing an id/case_id column")
+        raw = df[id_column].astype(str)
+        ids = raw.str.strip()
+        if ids.eq("").any():
+            raise ValueError(f"{label} CSV contains a blank case ID")
+        if raw.ne(ids).any():
+            raise ValueError(
+                f"{label} CSV contains a case ID with surrounding whitespace"
+            )
+        duplicates = sorted(set(ids[ids.duplicated(keep=False)]))
+        if duplicates:
+            preview = ", ".join(duplicates[:3])
+            raise ValueError(f"{label} CSV contains duplicate case ID(s): {preview}")
+        return id_column, ids
+
+    data_id_column, data_ids = _validated_ids(data_df, "data")
+    judgement_id_column, judgement_ids = _validated_ids(j_df, "judgement")
+    data_id_set = set(data_ids)
+    foreign_ids = [case_id for case_id in judgement_ids if case_id not in data_id_set]
+    if foreign_ids:
+        preview = ", ".join(foreign_ids[:3])
+        raise ValueError(
+            "judgement CSV contains case ID(s) absent from its data CSV: " + preview
+        )
+
+    # Keep the judgement schema, adding data-owned columns if a legacy file is
+    # missing them. Judge-owned columns are never copied from the data CSV on
+    # an existing row.
+    output_columns = list(j_df.columns)
+    for column in ("complete", "transcript"):
+        if column in data_df.columns and column not in output_columns:
+            output_columns.append(column)
+
+    data_by_id = {
+        case_id: data_df.iloc[position] for position, case_id in enumerate(data_ids)
+    }
+    judgement_by_id = {
+        case_id: j_df.iloc[position] for position, case_id in enumerate(judgement_ids)
+    }
+    rows: list[dict] = []
+    for case_id in data_ids:
+        data_row = data_by_id[case_id]
+        existing = judgement_by_id.get(case_id)
+        if existing is None:
+            row = {}
+            for column in output_columns:
+                if column == judgement_id_column:
+                    row[column] = case_id
+                elif column.startswith("complete"):
+                    row[column] = False
+                elif column.startswith("answer_"):
+                    row[column] = ""
+                elif column in data_df.columns:
+                    row[column] = data_row[column]
                 else:
-                    new_rows[col] = ""
-        new_rows = new_rows[j_df.columns]
-        j_df = pd.concat([j_df, new_rows], ignore_index=True)
+                    row[column] = ""
+        else:
+            row = {column: existing.get(column, "") for column in output_columns}
+            row[judgement_id_column] = case_id
 
-    # Sync columns that are owned by the data CSV (not by the judge).
-    n = min(len(data_df), len(j_df))
-    for col in ("complete", "transcript"):
-        if col in data_df.columns and col in j_df.columns and n > 0:
-            j_df.loc[: n - 1, col] = data_df.loc[: n - 1, col].values
+        # These fields belong to the debate/data stage and must follow the ID,
+        # not the judgement file's previous row position.
+        for column in ("complete", "transcript"):
+            if column in data_df.columns:
+                row[column] = data_row[column]
+        rows.append(row)
 
-    j_df.to_csv(judgement_csv, index=False)
+    reconciled = pd.DataFrame(rows, columns=output_columns)
+    # A differently named data ID column is not judge-owned; if it is present
+    # in the judgement schema, keep it aligned too.
+    if data_id_column in reconciled.columns:
+        reconciled[data_id_column] = data_ids.values
+    _atomic_write_csv(reconciled, judgement_csv)
 
 
 async def run_judge(
@@ -83,13 +198,14 @@ async def run_judge(
     n_vote: int = 0,
     judge_type: JudgeType = JudgeType.default,
 ):
-    # load data
+    # Load the whole working dataset. ``limit`` selects the target cohort but
+    # must never truncate rows already present in a resumable CSV.
     full_df = pd.read_csv(filename, keep_default_na=False)
-    if limit is not None:
-        full_df = full_df.head(int(limit))
-    assert full_df[
-        "complete"
-    ].all(), "Not all values in the column 'complete' are True, rerun debate"
+    target_df = full_df.head(int(limit)) if limit is not None else full_df
+    target_indices = target_df.index
+    assert _completed_mask(
+        target_df["complete"]
+    ).all(), "Not all values in the column 'complete' are True, rerun debate"
 
     # majority voting setup
     n_vote_str = n_vote if n_vote > 0 else ""
@@ -97,9 +213,34 @@ async def run_judge(
     judge_column = f"answer_{judge_type}{n_vote_str}"
     if complete_column not in full_df.columns:
         full_df[complete_column] = False
+    if judge_column not in full_df.columns:
         full_df[judge_column] = ""
+
+    # Repair legacy checkpoints that marked an API call successful even though
+    # its text never produced a usable final answer. Without this migration,
+    # resume would skip exactly the rows it now needs to retry.
+    if judge_type == JudgeType.default:
+        target_completion = _completed_mask(
+            full_df.loc[target_indices, complete_column]
+        )
+        target_parseable = full_df.loc[target_indices, judge_column].map(
+            _parseable_ab_judgement
+        )
+        invalid_complete_indices = target_completion[
+            target_completion & ~target_parseable
+        ].index
+        if len(invalid_complete_indices) > 0:
+            LOGGER.warning(
+                "Resetting %d cached judge row(s) with no unambiguous final "
+                "A/B so resume can retry them",
+                len(invalid_complete_indices),
+            )
+            full_df.loc[invalid_complete_indices, complete_column] = False
+            _atomic_write_csv(full_df, filename)
+
     # filter out rows that have already been completed
-    df = full_df[full_df[complete_column] == False]
+    target_df = full_df.loc[target_indices]
+    df = target_df[~_completed_mask(target_df[complete_column])]
 
     LOGGER.info(f"Using column {complete_column}")
     LOGGER.info(f"Using file {filename}")
@@ -109,7 +250,36 @@ async def run_judge(
 
     async def bounded_run(sem, index, row, swap, round_limit):
         async with sem:
-            return await judge.make_decision(index, row, swap, round_limit)
+            try:
+                result = await judge.make_decision(index, row, swap, round_limit)
+                result_complete = bool(result["complete"])
+                if (
+                    result_complete
+                    and judge_type == JudgeType.default
+                    and not _parseable_ab_judgement(result["judgement"])
+                ):
+                    LOGGER.warning(
+                        "Judge case %s returned no unambiguous final A/B; "
+                        "leaving it incomplete so resume can retry it",
+                        index,
+                    )
+                    result_complete = False
+                # Persist immediately after the paid response, before this
+                # coroutine can yield again. Coroutines run on one event-loop
+                # thread, so each atomic replacement is a single-writer step.
+                full_df.at[index, judge_column] = result["judgement"]
+                full_df.at[index, complete_column] = result_complete
+                if "transcript" in result:
+                    full_df.at[index, "transcript"] = result["transcript"]
+                _atomic_write_csv(full_df, filename)
+                return result_complete
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A failed case must not discard completed, already-persisted
+                # siblings from the same asynchronous batch.
+                LOGGER.exception("Judge case %s failed", index)
+                return False
 
     sem = asyncio.Semaphore(int(anthropic_num_threads))
     tasks = [
@@ -117,38 +287,19 @@ async def run_judge(
     ]
     results = await asyncio.gather(*tasks)
 
-    correct = sum([bool(result["complete"]) for result in results])
+    correct = sum(results)
     LOGGER.info(f"Processed {len(results)} rows. {correct} were complete.")
-
-    df.update(
-        pd.DataFrame(
-            {
-                judge_column: [result["judgement"] for result in results],
-                complete_column: [result["complete"] for result in results],
-            },
-            index=df.index,
-        )
-    )
-    # some judgments apply swap to the transcript so return a new one
-    if results and "transcript" in results[0]:
-        df.update(
-            pd.DataFrame(
-                {
-                    "transcript": [result["transcript"] for result in results],
-                },
-                index=df.index,
-            )
-        )
-    full_df.update(df)
-
-    full_df.to_csv(filename, index=False)
     # See core/debate.py: the second element is how many rows this attempt
     # newly completed, which the retry loop uses as its no-progress guard.
-    return bool(full_df[complete_column].eq(True).all()), int(correct)
+    target_complete = _completed_mask(
+        full_df.loc[target_indices, complete_column]
+    ).all()
+    return bool(target_complete), int(correct)
 
 
 @hydra.main(version_base=None, config_path="config/", config_name="config")
 def main(cfg: DictConfig):
+    _require_app_runner()
     complete = asyncio.run(async_main(cfg))
     if not complete:
         raise RuntimeError(

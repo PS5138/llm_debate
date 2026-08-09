@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -23,6 +24,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -40,6 +42,13 @@ FAMILY_MODELS = {
     "openai": {"frontier": "gpt-5.5", "weaker": "gpt-5.4-mini"},
     "anthropic": {"frontier": "claude-opus-4-6", "weaker": "claude-sonnet-4-6"},
 }
+CONCESSION_MODEL = "gpt-4o-mini"
+
+# Model values are interpolated into Hydra overrides and also become judgement
+# directory names.  This app intentionally exposes one fixed, reproducible
+# model trio per family, so saved metadata must never be treated as a free-form
+# Hydra expression or path component.
+_SAFE_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def missing_baseline_files(
@@ -146,6 +155,18 @@ def _judgement_is_parseable(value: object) -> bool:
     except (IndexError, TypeError, ValueError):
         return False
     return found_a != found_b
+
+
+def arm_judgement_is_complete(answers: object) -> bool:
+    """Whether both orderings of one live arm are finished and scoreable."""
+    if not isinstance(answers, dict):
+        return False
+    return (
+        answers.get("orig_complete") is True
+        and answers.get("swap_complete") is True
+        and _judgement_is_parseable(answers.get("orig", ""))
+        and _judgement_is_parseable(answers.get("swap", ""))
+    )
 
 
 def _baseline_csv_issue(
@@ -262,6 +283,7 @@ def baselines_dir_is_complete(
 
 def canonical_baselines_path(
     family: str,
+    judges: tuple[str, str] | None = None,
     min_rows: int | None = None,
     expected_ids: tuple[str, ...] | None = None,
 ) -> Optional[Path]:
@@ -276,7 +298,11 @@ def canonical_baselines_path(
     return (
         path
         if baselines_dir_is_complete(
-            path, family, min_rows=min_rows, expected_ids=expected_ids
+            path,
+            family,
+            judges=judges,
+            min_rows=min_rows,
+            expected_ids=expected_ids,
         )
         else None
     )
@@ -314,6 +340,15 @@ COST_PER_CASE_USD = {
     "anthropic": 2.50,
 }
 
+# Extra planning allowance when blind + oracle baselines are deliberately
+# recomputed instead of reusing a validated bundle. OpenAI uses the documented
+# ~$2/100-case upper ballpark. Anthropic is intentionally more conservative
+# until a full Opus + Sonnet baseline pass has been calibrated locally.
+BASELINE_RECOMPUTE_COST_PER_CASE_USD = {
+    "openai": 0.02,
+    "anthropic": 0.50,
+}
+
 CONDITIONS = [
     "e1_info_asymmetry",
     "e2_double_asymmetry",
@@ -323,7 +358,19 @@ CONDITIONS = [
 
 
 def create_results_root(base_dir: Path = REPO_ROOT / "exp") -> Path:
-    """Create a fresh timestamped results directory under exp/."""
+    """Create a fresh timestamped results directory under a trusted base.
+
+    The default app path is repository-owned.  Reject links in that relative
+    path before creating anything so a replaced ``exp`` directory cannot
+    redirect a fresh run outside the checkout.  Custom bases (used by tests
+    and embedders) still reject a symlink at the base itself.
+    """
+    if _path_has_unsafe_hydra_syntax(base_dir):
+        raise ValueError(f"unsafe results base path: {base_dir}")
+    trusted_root = _trusted_output_anchor(base_dir)
+    issue = _symlink_component_issue(base_dir, trusted_root)
+    if issue is not None:
+        raise ValueError(f"unsafe results base path: {issue}")
     base_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
     candidate = base_dir / f"{stamp}_results"
@@ -332,7 +379,555 @@ def create_results_root(base_dir: Path = REPO_ROOT / "exp") -> Path:
         candidate = base_dir / f"{stamp}_results_{suffix}"
         suffix += 1
     candidate.mkdir(parents=True)
+    if candidate.is_symlink() or not _path_is_within(candidate, base_dir):
+        try:
+            candidate.rmdir()
+        except OSError:
+            pass
+        raise ValueError(f"unsafe fresh results path: {candidate}")
     return candidate
+
+
+def _portable_metadata_path(path: Path) -> str:
+    """Store in-repository paths relative to the repo so runs survive moves."""
+    absolute = path.resolve()
+    try:
+        return absolute.relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(absolute)
+
+
+def _resolve_metadata_path(value: object) -> Optional[Path]:
+    """Resolve a path read from metadata written before or after portability."""
+    if value is None or not str(value).strip():
+        return None
+    raw = str(value).strip()
+    path = Path(raw)
+    if _path_has_unsafe_hydra_syntax(path):
+        return None
+    if not path.is_absolute() and ".." in path.parts:
+        return None
+    return path if path.is_absolute() else REPO_ROOT / path
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves inside ``root``, following any symlinks."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _paths_resolve_equal(left: Path, right: Path) -> bool:
+    """Fail-closed resolved path equality for metadata-controlled paths."""
+    try:
+        return left.resolve() == right.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _path_is_lexically_within(path: Path, root: Path) -> bool:
+    """Whether an absolute path is lexically below ``root`` without links."""
+    try:
+        path.absolute().relative_to(root.absolute())
+    except ValueError:
+        return False
+    return True
+
+
+def _symlink_component_issue(path: Path, trusted_root: Path) -> Optional[str]:
+    """Describe a symlink component between ``trusted_root`` and ``path``.
+
+    Checking component-by-component, before resolving, prevents a top-level
+    app output directory or one of its parents inside the checkout from
+    redirecting fresh writes.  System-level aliases above ``trusted_root``
+    (for example macOS ``/var``) are intentionally outside this boundary.
+    """
+    absolute_path = path.absolute()
+    absolute_root = trusted_root.absolute()
+    try:
+        relative = absolute_path.relative_to(absolute_root)
+    except ValueError:
+        return f"{absolute_path} is outside trusted root {absolute_root}"
+    current = absolute_root
+    if current.is_symlink():
+        return f"path component is a symlink: {current}"
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return f"path component is a symlink: {current}"
+    return None
+
+
+def _trusted_output_anchor(path: Path) -> Path:
+    """Choose the boundary whose descendants must be free of symlinks."""
+    for candidate in (REPO_ROOT, Path(tempfile.gettempdir())):
+        if _path_is_lexically_within(path, candidate):
+            return candidate
+    return path.parent
+
+
+def _tree_contains_symlink(path: Path) -> bool:
+    """Fail-closed check for links inside a potentially writable tree."""
+    if path.is_symlink():
+        return True
+    if not path.exists():
+        return False
+    try:
+        return any(child.is_symlink() for child in path.rglob("*"))
+    except OSError:
+        return True
+
+
+def _writable_run_tree_issue(
+    exp_dir: Path,
+    family: str,
+    *,
+    include_baselines: bool = False,
+) -> Optional[str]:
+    """Return why an app-owned output tree is unsafe to write.
+
+    Saved runs are local data, but they may have been copied from elsewhere or
+    modified since the app created them.  Refuse symlinks in every subtree the
+    app will mutate so a crafted resume cannot redirect CSV, plot, or metadata
+    writes outside its results directory.  Canonical/external baseline trees
+    are deliberately excluded when they are read-only.
+    """
+    if family not in FAMILY_MODELS:
+        return f"unknown family {family!r}"
+    if _path_has_unsafe_hydra_syntax(exp_dir):
+        return f"results root contains Hydra interpolation/control syntax: {exp_dir}"
+    if _path_is_lexically_within(exp_dir, REPO_ROOT):
+        component_issue = _symlink_component_issue(exp_dir, REPO_ROOT)
+        if component_issue is not None:
+            return component_issue
+    if exp_dir.is_symlink():
+        return f"results root is a symlink: {exp_dir}"
+    if not exp_dir.exists() or not exp_dir.is_dir():
+        return f"results root is not a directory: {exp_dir}"
+
+    root_metadata = exp_dir / "run_metadata.json"
+    if root_metadata.is_symlink():
+        return f"root metadata is a symlink: {root_metadata}"
+
+    writable_trees = [exp_dir / family, exp_dir / "medical_results"]
+    if include_baselines:
+        writable_trees.append(exp_dir / "baselines" / family)
+    for tree in writable_trees:
+        if not _path_is_within(tree, exp_dir):
+            return f"writable path escapes the results root: {tree}"
+        if _tree_contains_symlink(tree):
+            return f"writable path contains a symlink: {tree}"
+    return None
+
+
+def _validate_writable_run_tree(
+    exp_dir: Path,
+    family: str,
+    *,
+    include_baselines: bool = False,
+) -> None:
+    """Raise before any app-owned run path can be mutated unsafely."""
+    issue = _writable_run_tree_issue(
+        exp_dir, family, include_baselines=include_baselines
+    )
+    if issue is not None:
+        raise ValueError(f"unsafe saved run: {issue}")
+
+
+def _validate_model_id(value: object, *, label: str, expected: str) -> str:
+    """Validate one fixed model alias read from UI input or saved metadata."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} model is missing")
+    model = value.strip()
+    if (
+        not _SAFE_MODEL_ID.fullmatch(model)
+        or "${" in model
+        or any(ord(char) < 32 or ord(char) == 127 for char in model)
+        or Path(model).name != model
+    ):
+        raise ValueError(
+            f"{label} model contains unsafe Hydra or path syntax: {model!r}"
+        )
+    if model != expected:
+        raise ValueError(
+            f"unsupported {label} model for this fixed experiment: {model!r}; "
+            f"expected {expected!r}"
+        )
+    return model
+
+
+def _validate_model_trio(
+    family: str,
+    frontier: object,
+    weaker: object,
+    concession: object,
+) -> tuple[str, str, str]:
+    """Return the exact supported model trio for ``family`` or fail closed."""
+    if family not in FAMILY_MODELS:
+        raise ValueError(f"unknown family: {family!r}")
+    expected = FAMILY_MODELS[family]
+    return (
+        _validate_model_id(frontier, label="frontier", expected=expected["frontier"]),
+        _validate_model_id(weaker, label="weaker", expected=expected["weaker"]),
+        _validate_model_id(concession, label="concession", expected=CONCESSION_MODEL),
+    )
+
+
+def _path_has_unsafe_hydra_syntax(path: Path) -> bool:
+    """Whether a filesystem path could become Hydra/OmegaConf syntax."""
+    value = path.as_posix()
+    return "${" in value or any(ord(char) < 32 or ord(char) == 127 for char in value)
+
+
+def _load_json_dict(path: Path) -> Optional[dict]:
+    """Load a JSON object, rejecting malformed data and other JSON shapes."""
+    if path.is_symlink():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _record_matches_family(record: Optional[dict], family: str) -> bool:
+    """Whether a metadata copy can safely describe ``family``.
+
+    Older partial metadata sometimes omitted ``family`` entirely, so absence
+    is recoverable from the root key or directory name. An explicit different
+    family is not recoverable and must never be merged into this record.
+    """
+    if record is None:
+        return False
+    recorded = record.get("family")
+    return recorded is None or (
+        isinstance(recorded, str) and recorded.strip() == family
+    )
+
+
+def _saved_metadata_timestamp(meta: dict, family_record: dict) -> Optional[float]:
+    """Return an explicit metadata timestamp, without filesystem fallback."""
+    values = (
+        family_record.get("last_updated_at_utc"),
+        family_record.get("recorded_at_utc"),
+        meta.get("last_updated_at_utc"),
+        meta.get("created_or_updated_at_utc"),
+    )
+    for value in values:
+        if not value:
+            continue
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _saved_models(record: dict, family: str) -> tuple[str, str, str]:
+    """Read the exact model trio a resumable run recorded.
+
+    Model defaults are deliberately not substituted for missing metadata.
+    Doing so after a configuration change could mix models inside one results
+    directory on resume.
+    """
+    if not _record_matches_family(record, family):
+        raise ValueError(
+            f"resume metadata family mismatch: requested {family!r}, "
+            f"recorded {record.get('family')!r}"
+        )
+    labels = (
+        ("frontier_model", "frontier"),
+        ("weaker_model", "weaker"),
+        ("concession_model", "concession"),
+    )
+    values: list[str] = []
+    missing: list[str] = []
+    for key, label in labels:
+        value = record.get(key)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(label)
+        else:
+            values.append(value.strip())
+    if missing:
+        raise ValueError(
+            "resume metadata is missing the recorded "
+            f"{', '.join(missing)} model(s); refusing to guess and mix model "
+            "versions in the existing run"
+        )
+    return _validate_model_trio(family, values[0], values[1], values[2])
+
+
+def _recorded_run_roots(
+    record: dict,
+    exp_dir: Path,
+    recorded_run_root: object = None,
+) -> list[Path]:
+    """Recover metadata-derived old roots that identify this exact run.
+
+    Matching the directory name prevents a similarly-shaped external baseline
+    path from being rebased merely because it ends in
+    ``<run>/baselines/<family>``.
+    """
+    candidates = [recorded_run_root]
+    family_dir = _resolve_metadata_path(record.get("family_dir"))
+    if family_dir is not None:
+        candidates.append(family_dir.parent)
+    roots: list[Path] = []
+    for value in candidates:
+        path = _resolve_metadata_path(value)
+        if (
+            path is not None
+            and path.name == exp_dir.name
+            and all(not _paths_resolve_equal(path, root) for root in roots)
+        ):
+            roots.append(path)
+    return roots
+
+
+def _baseline_source_from_record(
+    record: dict,
+    exp_dir: Path,
+    family: str,
+    recorded_run_root: object = None,
+) -> tuple[Optional[Path], Optional[bool]]:
+    """Resolve one run's saved baseline source after a repository move.
+
+    New metadata records relative in-repo paths. Older metadata used absolute
+    paths, so use its recorded run root to rebase canonical and per-run paths
+    onto the current checkout. Arbitrary external baseline paths remain
+    absolute.
+    """
+    raw_value = record.get("baselines_dir")
+    raw_path = _resolve_metadata_path(raw_value)
+    explicit_canonical = record.get("using_canonical_baselines")
+    if "using_canonical_baselines" in record and not isinstance(
+        explicit_canonical, bool
+    ):
+        return None, None
+    canonical = CANONICAL_BASELINES_ROOT / family
+    per_run = exp_dir / "baselines" / family
+    old_run_roots = _recorded_run_roots(record, exp_dir, recorded_run_root)
+
+    inferred_path: Optional[Path] = None
+    inferred_canonical: Optional[bool] = None
+
+    if raw_path is not None and _paths_resolve_equal(raw_path, canonical):
+        inferred_path, inferred_canonical = canonical, True
+
+    # Legacy metadata stored absolute paths. Rebase only when the path is
+    # provably tied to this record's old run root; suffix-only matching can
+    # mistake an intentional external baseline archive for an in-run path.
+    if inferred_path is None:
+        for old_run_root in old_run_roots:
+            old_per_run = old_run_root / "baselines" / family
+            if raw_path is not None and _paths_resolve_equal(raw_path, old_per_run):
+                inferred_path, inferred_canonical = per_run, False
+                break
+            if old_run_root.parent.name == "exp":
+                old_canonical = (
+                    old_run_root.parent.parent / "data" / "canonical_baselines" / family
+                )
+                if raw_path is not None and _paths_resolve_equal(
+                    raw_path, old_canonical
+                ):
+                    inferred_path, inferred_canonical = canonical, True
+                    break
+
+    if inferred_path is None and raw_path is not None:
+        if _paths_resolve_equal(raw_path, per_run):
+            inferred_path, inferred_canonical = per_run, False
+        else:
+            inferred_path, inferred_canonical = raw_path, False
+
+    if inferred_path is not None:
+        # The flag and path are a single trust decision. A crafted or partially
+        # edited record must not use one to silently override the other.
+        if (
+            isinstance(explicit_canonical, bool)
+            and explicit_canonical is not inferred_canonical
+        ):
+            return None, None
+        return inferred_path, inferred_canonical
+    if raw_value is not None and str(raw_value).strip():
+        # A present-but-unsafe path must not silently degrade into a writable
+        # in-run baseline target.
+        return None, None
+    # Older metadata sometimes recorded only the boolean source choice. Keep
+    # that legitimate format resumable while never guessing when both fields
+    # are absent.
+    if explicit_canonical is True:
+        return canonical, True
+    if explicit_canonical is False:
+        return per_run, False
+    return None, None
+
+
+def _baseline_source_is_writable_in_run(path: Path, exp_dir: Path, family: str) -> bool:
+    """Whether resume may safely continue baseline stages in this run tree."""
+    expected = exp_dir / "baselines" / family
+    try:
+        return (
+            _paths_resolve_equal(path, expected)
+            and _path_is_within(path, exp_dir)
+            and not _tree_contains_symlink(path)
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
+def _merged_family_record(
+    exp_dir: Path,
+    family: str,
+    root_meta: Optional[dict] = None,
+) -> tuple[Optional[dict], object, float]:
+    """Return one consistent family record for discovery and construction.
+
+    Root and family metadata are normally written together, but an interrupted
+    write can leave one copy newer or incomplete. Prefer the newer copy and
+    fill only its missing keys from the other so the sidebar and DebateRun use
+    the same saved source.
+    """
+    if root_meta is None:
+        root_meta = _load_json_dict(exp_dir / "run_metadata.json") or {}
+    families = root_meta.get("families")
+    root_record = families.get(family) if isinstance(families, dict) else None
+    if not isinstance(root_record, dict) or not _record_matches_family(
+        root_record, family
+    ):
+        root_record = None
+
+    family_meta_path = exp_dir / family / "run_metadata.json"
+    family_record = _load_json_dict(family_meta_path)
+    if not _record_matches_family(family_record, family):
+        family_record = None
+    if root_record is None and family_record is None:
+        return None, root_meta.get("run_root"), 0.0
+
+    family_saved_timestamp = (
+        _saved_metadata_timestamp({}, family_record)
+        if family_record is not None
+        else None
+    )
+    root_saved_timestamp = (
+        _saved_metadata_timestamp({}, root_record) if root_record is not None else None
+    )
+    # The root-level update time may have been bumped by the *other* family.
+    # Use it only for a genuinely single-family legacy root when neither copy
+    # has a family-specific timestamp; a shared root timestamp cannot safely
+    # be attributed to either family.
+    if (
+        root_record is not None
+        and root_saved_timestamp is None
+        and family_saved_timestamp is None
+        and isinstance(families, dict)
+        and len(families) == 1
+    ):
+        root_saved_timestamp = _saved_metadata_timestamp(root_meta, {})
+    root_timestamp = (
+        root_saved_timestamp
+        if root_saved_timestamp is not None
+        else _metadata_timestamp({}, {}, exp_dir)
+        if root_record is not None
+        else 0.0
+    )
+    family_timestamp = (
+        family_saved_timestamp
+        if family_saved_timestamp is not None
+        else (
+            _metadata_timestamp({}, {}, family_meta_path)
+            if family_record is not None
+            else 0.0
+        )
+    )
+
+    # An explicit saved timestamp always outranks a timestamp-less partial
+    # copy. In particular, merely writing ``{}`` to family metadata must not
+    # make an older run look newer through that file's mtime.
+    if root_saved_timestamp is not None and family_saved_timestamp is None:
+        primary, secondary = root_record, family_record
+        timestamp = root_timestamp
+    elif family_saved_timestamp is not None and root_saved_timestamp is None:
+        primary, secondary = family_record, root_record
+        timestamp = family_timestamp
+    elif family_record is not None and family_timestamp > root_timestamp:
+        primary, secondary = family_record, root_record
+        timestamp = family_timestamp
+    else:
+        primary, secondary = root_record, family_record
+        timestamp = root_timestamp
+
+    merged = dict(secondary or {})
+    merged.update(primary or {})
+    # Treat baseline path + canonical flag as one decision. Mixing a newer
+    # path with an older flag can change the source despite choosing the right
+    # metadata copy.
+    if primary is not None and (
+        primary.get("baselines_dir") or "using_canonical_baselines" in primary
+    ):
+        for key in ("baselines_dir", "using_canonical_baselines"):
+            if key in primary:
+                merged[key] = primary[key]
+            else:
+                merged.pop(key, None)
+    return merged, root_meta.get("run_root"), timestamp
+
+
+def _metadata_timestamp(meta: dict, family_record: dict, candidate: Path) -> float:
+    """Best available saved-run timestamp, with directory mtime as fallback."""
+    saved = _saved_metadata_timestamp(meta, family_record)
+    if saved is not None:
+        return saved
+    try:
+        return candidate.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _results_dir_tiebreaker(path: Path) -> tuple[str, int]:
+    """Stable ordering for runs whose metadata has second-level precision."""
+    stem, suffix = path.name.rsplit("_results", 1)
+    collision = int(suffix[1:]) if suffix.startswith("_") else 1
+    return stem, collision
+
+
+def _is_results_dir(path: Path) -> bool:
+    """True for timestamped result dirs, including collision suffixes."""
+    marker = "_results"
+    if marker not in path.name:
+        return False
+    suffix = path.name.rsplit(marker, 1)[1]
+    return suffix == "" or (suffix.startswith("_") and suffix[1:].isdigit())
+
+
+def _atomic_write_csv(frame: pd.DataFrame, destination: Path) -> None:
+    """Replace a CSV atomically without ever following a destination link."""
+    if destination.is_symlink():
+        raise ValueError(f"refusing to replace symlinked working CSV: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        try:
+            frame.to_csv(handle, index=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _extend_working_csv_from_pilot(working_csv: Path, target_n: int) -> int:
@@ -345,8 +940,43 @@ def _extend_working_csv_from_pilot(working_csv: Path, target_n: int) -> int:
     """
     if not working_csv.exists():
         return 0
-    df = pd.read_csv(working_csv, keep_default_na=False)
+    if target_n < 1 or target_n > 100:
+        raise ValueError("target_n must be between 1 and 100")
+    if working_csv.is_symlink():
+        raise ValueError(f"refusing to extend symlinked working CSV: {working_csv}")
+    try:
+        df = pd.read_csv(working_csv, keep_default_na=False)
+    except Exception as exc:
+        raise ValueError(f"working CSV is unreadable: {working_csv}") from exc
     current = len(df)
+
+    id_column = (
+        "id" if "id" in df.columns else "case_id" if "case_id" in df.columns else None
+    )
+    if id_column is None:
+        raise ValueError(f"working CSV is missing an id/case_id column: {working_csv}")
+    raw_existing_ids = tuple(df[id_column].astype(str))
+    existing_ids = tuple(case_id.strip() for case_id in raw_existing_ids)
+    if raw_existing_ids != existing_ids:
+        raise ValueError(f"working CSV contains a non-canonical case ID: {working_csv}")
+    if any(not case_id for case_id in existing_ids):
+        raise ValueError(f"working CSV contains a blank case ID: {working_csv}")
+    if len(set(existing_ids)) != len(existing_ids):
+        raise ValueError(f"working CSV contains duplicate case IDs: {working_csv}")
+
+    required_pilot_count = max(current, target_n)
+    expected_ids = pilot_case_ids(required_pilot_count)
+    if len(expected_ids) != required_pilot_count:
+        raise ValueError(
+            f"pilot does not contain {required_pilot_count} unique usable case IDs"
+        )
+    if len(set(expected_ids)) != len(expected_ids):
+        raise ValueError("pilot case IDs are not unique")
+    if existing_ids != expected_ids[:current]:
+        raise ValueError(
+            "working CSV case IDs must be the exact ordered prefix of the "
+            f"medical pilot; refusing to extend malformed cohort: {working_csv}"
+        )
     if current >= target_n:
         return 0
 
@@ -362,23 +992,51 @@ def _extend_working_csv_from_pilot(working_csv: Path, target_n: int) -> int:
     finally:
         tmp_path.unlink(missing_ok=True)
 
-    new_rows = fresh.iloc[current:target_n].copy()
-    # Fill any columns that the live CSV has but the freshly-loaded slice
-    # doesn't (e.g. complete_judge / answer_judge added by core.judge on
-    # earlier runs). Defaults are False for completion flags, "" otherwise.
-    for col in df.columns:
-        if col not in new_rows.columns:
-            if col.startswith("complete"):
-                new_rows[col] = False
+    fresh_id_column = (
+        "id"
+        if "id" in fresh.columns
+        else "case_id"
+        if "case_id" in fresh.columns
+        else None
+    )
+    if fresh_id_column is None:
+        raise ValueError("medical loader output is missing an id/case_id column")
+    fresh_ids = tuple(fresh[fresh_id_column].astype(str).str.strip())
+    if fresh_ids != expected_ids[:target_n] or len(set(fresh_ids)) != len(fresh_ids):
+        raise ValueError(
+            "medical loader output does not match the exact ordered pilot cohort"
+        )
+
+    # Start from canonical pilot rows, then overlay every existing cell by ID.
+    # This preserves transcript/completion/judgement state while avoiding a
+    # positional append that could attach state to the wrong patient.
+    out = fresh.copy()
+    out["__merge_case_id"] = out[fresh_id_column].astype(str).str.strip()
+    out.set_index("__merge_case_id", inplace=True, drop=True)
+    output_columns = list(df.columns) + [
+        column for column in fresh.columns if column not in df.columns
+    ]
+    for column in df.columns:
+        if column not in out.columns:
+            if column == id_column:
+                out[column] = out[fresh_id_column]
             else:
-                new_rows[col] = ""
-    new_rows = new_rows[df.columns]
-    out = pd.concat([df, new_rows], ignore_index=True)
-    out.to_csv(working_csv, index=False, encoding="utf-8")
+                out[column] = False if column.startswith("complete") else ""
+    for row_index, case_id in enumerate(existing_ids):
+        for column in df.columns:
+            out.at[case_id, column] = df.iloc[row_index][column]
+    out = out.loc[list(expected_ids[:target_n]), output_columns].reset_index(drop=True)
+    _atomic_write_csv(out, working_csv)
     return target_n - current
 
 
-def extend_run_to_n_cases(exp_dir: Path, family: str, target_n: int) -> dict:
+def extend_run_to_n_cases(
+    exp_dir: Path,
+    family: str,
+    target_n: int,
+    *,
+    include_baselines: bool = True,
+) -> dict:
     """Walk an existing run's exp dir and extend every working `data*.csv`
     to `target_n` rows. New rows have `complete=False` so the next pipeline
     pass will process them.
@@ -389,15 +1047,23 @@ def extend_run_to_n_cases(exp_dir: Path, family: str, target_n: int) -> dict:
     handles both row appends and `complete`/`transcript` re-sync, and is
     the single place where judgement CSVs get mutated.
 
+    ``include_baselines=False`` leaves baseline working files untouched. It
+    is required when a resume uses canonical/external read-only baselines,
+    including an in-run path that resolves through a symlink to an archive.
+
     Returns a {relative_path: rows_added} report for logging.
     """
+    _validate_writable_run_tree(exp_dir, family, include_baselines=include_baselines)
     report: dict = {}
     working_files = [
-        exp_dir / "baselines" / family / "baseline_blind" / "data0.csv",
-        exp_dir / "baselines" / family / "baseline_oracle" / "data0.csv",
         exp_dir / family / "debate_sim" / "data0.csv",
         exp_dir / family / "debate_sim" / "data0_swap.csv",
     ]
+    if include_baselines:
+        working_files[:0] = [
+            exp_dir / "baselines" / family / "baseline_blind" / "data0.csv",
+            exp_dir / "baselines" / family / "baseline_oracle" / "data0.csv",
+        ]
     for wf in working_files:
         if wf.exists():
             added = _extend_working_csv_from_pilot(wf, target_n)
@@ -405,58 +1071,269 @@ def extend_run_to_n_cases(exp_dir: Path, family: str, target_n: int) -> dict:
     return report
 
 
-def find_latest_run(base_dir: Path = REPO_ROOT / "exp") -> Optional[dict]:
-    """Scan exp/ for the most recent `<timestamp>_results/` directory and
-    return its metadata (family, n_cases, frontier/weaker models, path).
+def _judgement_csv_is_complete(path: Path, expected_ids: tuple[str, ...]) -> bool:
+    """Whether a judge output finished every requested case.
 
-    Returns None if no resumable run is found. The dir is considered
-    resumable if it has a `run_metadata.json` at the root level so we
-    can recover family + n_cases without asking the user.
+    Judgements may legitimately be inconclusive, so this completion check does
+    not require the answer to be scoreable. It is used only to decide whether
+    a sibling family's cached output is complete enough to preserve during a
+    combined re-aggregation.
     """
-    if not base_dir.exists():
-        return None
-    candidates = sorted(
-        (p for p in base_dir.iterdir() if p.is_dir() and p.name.endswith("_results")),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    if not expected_ids:
+        return False
+    try:
+        df = pd.read_csv(path, keep_default_na=False)
+    except Exception:
+        return False
+    id_column = (
+        "id" if "id" in df.columns else "case_id" if "case_id" in df.columns else None
     )
-    for cand in candidates:
-        meta_path = cand / "run_metadata.json"
-        if not meta_path.exists():
-            continue
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        families = meta.get("families") or {}
-        if not families:
-            continue
-        # Take the first (usually only) family recorded.
-        family_name, family_record = next(iter(families.items()))
-        # Recover the run's original baseline source so resume can honour
-        # it. Older metadata didn't record `using_canonical_baselines`
-        # explicitly, so infer it from whether the recorded `baselines_dir`
-        # equals the canonical path for this family.
-        recorded_baselines_dir = family_record.get("baselines_dir")
-        baselines_dir = Path(recorded_baselines_dir) if recorded_baselines_dir else None
-        using_canonical = family_record.get("using_canonical_baselines")
-        if using_canonical is None:
-            canonical = CANONICAL_BASELINES_ROOT / family_name
-            using_canonical = (
-                baselines_dir is not None
-                and baselines_dir.resolve() == canonical.resolve()
+    if id_column is None:
+        return False
+    ids = df[id_column].astype(str).str.strip()
+    if ids.eq("").any() or ids.duplicated(keep=False).any():
+        return False
+    complete_columns = [
+        column
+        for column in df.columns
+        if column == "complete_judge" or column.startswith("complete_judge_")
+    ]
+    if not complete_columns:
+        return False
+    complete = df[complete_columns[0]].map(
+        lambda value: value is True or str(value).strip().lower() == "true"
+    )
+    by_id = dict(zip(ids, complete))
+    return all(by_id.get(str(case_id).strip(), False) for case_id in expected_ids)
+
+
+def _family_outputs_are_complete(exp_dir: Path, family: str, record: dict) -> bool:
+    """True when all E1-E4 cached judge outputs cover the saved cohort."""
+    try:
+        frontier, weaker, _ = _saved_models(record, family)
+        n_cases = int(record.get("n_cases", 0))
+    except (TypeError, ValueError):
+        return False
+    if n_cases < 1 or n_cases > 100:
+        return False
+    expected_ids = pilot_case_ids(n_cases)
+    judge_for_condition = {
+        "e1_info_asymmetry": frontier,
+        "e2_double_asymmetry": weaker,
+        "e3_capability_asymmetry": weaker,
+        "e4_full_symmetry": frontier,
+    }
+    debate_root = exp_dir / family / "debate_sim"
+    return all(
+        _judgement_csv_is_complete(
+            debate_root / f"{condition}_{judge}" / filename,
+            expected_ids,
+        )
+        for condition, judge in judge_for_condition.items()
+        for filename in ("data0_judgement.csv", "data0_swap_judgement.csv")
+    )
+
+
+def _family_output_case_ids(
+    exp_dir: Path, family: str, record: dict
+) -> Optional[tuple[str, ...]]:
+    """Return the saved-cohort IDs present in any expected debate output.
+
+    A sibling family may be midway through an extension: its metadata already
+    records the new target while its cached judgement CSVs still contain only
+    the earlier completed cohort. Aggregation can safely retain those existing
+    rows, provided their IDs are structurally sound and their baselines cover
+    the rows that are actually present. ``None`` means the cached output is
+    malformed or outside the saved pilot cohort and aggregation must fail
+    closed rather than overwrite shared derived tables.
+    """
+    try:
+        frontier, weaker, _ = _saved_models(record, family)
+        n_cases = int(record.get("n_cases", 0))
+    except (TypeError, ValueError):
+        return None
+    if n_cases < 1 or n_cases > 100:
+        return None
+    expected_ids = pilot_case_ids(n_cases)
+    if len(expected_ids) != n_cases:
+        return None
+    expected_set = set(expected_ids)
+    observed: set[str] = set()
+    judge_for_condition = {
+        "e1_info_asymmetry": frontier,
+        "e2_double_asymmetry": weaker,
+        "e3_capability_asymmetry": weaker,
+        "e4_full_symmetry": frontier,
+    }
+    debate_root = exp_dir / family / "debate_sim"
+    for condition, judge in judge_for_condition.items():
+        for filename in ("data0_judgement.csv", "data0_swap_judgement.csv"):
+            path = debate_root / f"{condition}_{judge}" / filename
+            if not path.exists():
+                continue
+            try:
+                frame = pd.read_csv(path, keep_default_na=False)
+            except Exception:
+                return None
+            id_column = (
+                "id"
+                if "id" in frame.columns
+                else "case_id"
+                if "case_id" in frame.columns
+                else None
             )
-        return {
-            "exp_dir": cand,
-            "family": family_name,
-            "n_cases": int(family_record.get("n_cases", 0)),
-            "frontier_model": family_record.get("frontier_model"),
-            "weaker_model": family_record.get("weaker_model"),
-            "recorded_at_utc": family_record.get("recorded_at_utc"),
-            "baselines_dir": baselines_dir,
-            "using_canonical_baselines": bool(using_canonical),
-        }
-    return None
+            if id_column is None:
+                return None
+            ids = frame[id_column].astype(str).str.strip()
+            if ids.eq("").any() or ids.duplicated(keep=False).any():
+                return None
+            file_ids = set(ids)
+            if not file_ids.issubset(expected_set):
+                return None
+            observed.update(file_ids)
+    return tuple(case_id for case_id in expected_ids if case_id in observed)
+
+
+def find_latest_run(
+    base_dir: Path = REPO_ROOT / "exp",
+    family: Optional[str] = None,
+) -> Optional[dict]:
+    """Return the latest saved run, optionally limited to one model family.
+
+    A directory is resumable when its name follows the timestamped
+    `*_results` convention and either root or family metadata contains a valid
+    record. Saved metadata timestamps determine recency; directory mtime is
+    only a fallback for older records.
+    """
+    if base_dir.is_symlink() or not base_dir.exists() or not base_dir.is_dir():
+        return None
+    if family is not None and family not in FAMILY_MODELS:
+        return None
+
+    resumable: list[tuple[float, tuple[str, int], str, dict]] = []
+    for cand in (
+        p
+        for p in base_dir.iterdir()
+        if p.is_dir() and not p.is_symlink() and _is_results_dir(p)
+    ):
+        meta = _load_json_dict(cand / "run_metadata.json") or {}
+        families = meta.get("families")
+        root_families = families if isinstance(families, dict) else {}
+
+        if family is None:
+            family_names = [
+                name
+                for name in FAMILY_MODELS
+                if isinstance(root_families.get(name), dict)
+                or _load_json_dict(cand / name / "run_metadata.json") is not None
+            ]
+        elif (
+            isinstance(root_families.get(family), dict)
+            or _load_json_dict(cand / family / "run_metadata.json") is not None
+        ):
+            family_names = [family]
+        else:
+            continue
+        for family_name in family_names:
+            if _writable_run_tree_issue(cand, family_name) is not None:
+                # Do not display a target that construction must reject, and
+                # never follow a symlinked family/derived-results tree merely
+                # to populate the resume card.
+                continue
+            family_record, recorded_run_root, saved_timestamp = _merged_family_record(
+                cand, family_name, root_meta=meta
+            )
+            if family_record is None:
+                continue
+            try:
+                frontier_model, weaker_model, concession_model = _saved_models(
+                    family_record, family_name
+                )
+            except ValueError:
+                # A resume target without an unambiguous saved model trio is
+                # unsafe to display: constructing it would have to guess.
+                continue
+            try:
+                n_cases = int(family_record.get("n_cases", 0))
+            except (TypeError, ValueError):
+                continue
+            if n_cases < 1 or n_cases > 100:
+                continue
+            baselines_dir, using_canonical = _baseline_source_from_record(
+                family_record,
+                cand,
+                family_name,
+                recorded_run_root=recorded_run_root,
+            )
+            if baselines_dir is None:
+                # Resuming without the original denominator would silently
+                # change the experiment, so do not offer this as a target.
+                continue
+            expected_ids = pilot_case_ids(n_cases)
+            if len(expected_ids) != n_cases:
+                continue
+            baselines_writable = not bool(
+                using_canonical
+            ) and _baseline_source_is_writable_in_run(baselines_dir, cand, family_name)
+            # Partial app-owned baselines are deliberately resumable: their
+            # missing rows are exactly what the paid baseline stage will fill.
+            # Canonical and arbitrary external sources are read-only, so they
+            # must exist and be fully valid before they can be offered.
+            if not baselines_writable:
+                canonical_candidate = (
+                    canonical_baselines_path(
+                        family_name,
+                        judges=(weaker_model, frontier_model),
+                        min_rows=n_cases,
+                        expected_ids=expected_ids,
+                    )
+                    if using_canonical
+                    else None
+                )
+                invalid_canonical = bool(using_canonical) and (
+                    canonical_candidate is None
+                    or not _paths_resolve_equal(canonical_candidate, baselines_dir)
+                )
+                invalid_external = not bool(using_canonical) and (
+                    not baselines_dir.exists()
+                    or bool(
+                        missing_baseline_files(
+                            baselines_dir,
+                            family_name,
+                            judges=(weaker_model, frontier_model),
+                            min_rows=n_cases,
+                            expected_ids=expected_ids,
+                        )
+                    )
+                )
+                if invalid_canonical or invalid_external:
+                    continue
+            result = {
+                "exp_dir": cand,
+                "family": family_name,
+                "n_cases": n_cases,
+                "frontier_model": frontier_model,
+                "weaker_model": weaker_model,
+                "concession_model": concession_model,
+                "recorded_at_utc": family_record.get("recorded_at_utc"),
+                "last_updated_at_utc": family_record.get("last_updated_at_utc")
+                or meta.get("last_updated_at_utc"),
+                "baselines_dir": baselines_dir,
+                "using_canonical_baselines": bool(using_canonical),
+                "baselines_writable": baselines_writable,
+            }
+            resumable.append(
+                (
+                    saved_timestamp,
+                    _results_dir_tiebreaker(cand),
+                    family_name,
+                    result,
+                )
+            )
+
+    if not resumable:
+        return None
+    return max(resumable, key=lambda item: item[:3])[3]
 
 
 class Phase(str, Enum):
@@ -506,46 +1383,20 @@ class DebateRun:
         n_cases: int,
         openai_key: str,
         anthropic_key: str,
-        concession_model: str = "gpt-4o-mini",
+        concession_model: Optional[str] = None,
         resume_from: Optional[Path] = None,
         use_canonical_baselines: bool = True,
+        frontier_model: Optional[str] = None,
+        weaker_model: Optional[str] = None,
     ) -> None:
         if family not in FAMILY_MODELS:
             raise ValueError(f"unknown family: {family!r}")
         if n_cases < 1 or n_cases > 100:
             raise ValueError("n_cases must be between 1 and 100")
-        if not openai_key:
-            # OpenAI key is required because concession judging defaults to gpt-4o-mini.
-            raise ValueError(
-                "OpenAI API key is required (concession judge is gpt-4o-mini)"
-            )
-        if family == "anthropic" and not anthropic_key:
-            raise ValueError("Anthropic API key is required for the Anthropic family")
-
         self.family = family
         self.n_cases = int(n_cases)
-        self.concession_model = concession_model
         self.is_resume = resume_from is not None
         expected_baseline_ids = pilot_case_ids(self.n_cases)
-
-        self._tempdir = Path(tempfile.mkdtemp(prefix="medical_debate_app_"))
-        self._secrets_path = self._tempdir / "SECRETS"
-        self._secrets_path.write_text(
-            "\n".join(
-                [
-                    f"API_KEY={openai_key}",
-                    f"ANTHROPIC_API_KEY={anthropic_key or ''}",
-                    "DEFAULT_ORG=",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        # Lock down on POSIX so other users can't read the key file.
-        try:
-            os.chmod(self._secrets_path, 0o600)
-        except OSError:
-            pass
 
         # Resume mode: reuse the existing exp dir so the underlying
         # pipeline picks up where it left off (rows with complete=True
@@ -553,16 +1404,122 @@ class DebateRun:
         # are skipped by core.judge). Fresh mode: create a new timestamped
         # results root under exp/.
         self.extension_report: dict = {}
+        self._created_fresh_root = False
         if resume_from is not None:
+            resume_anchor = _trusted_output_anchor(resume_from)
+            component_issue = _symlink_component_issue(resume_from, resume_anchor)
+            if (
+                resume_from.is_symlink()
+                or component_issue is not None
+                or ".." in resume_from.parts
+                or _path_has_unsafe_hydra_syntax(resume_from)
+            ):
+                self._fail_setup(
+                    "unsafe saved run: resume path may not be a symlink, "
+                    "pass through a symlinked app path, contain '..', or "
+                    f"contain Hydra interpolation/control syntax: {resume_from}"
+                )
             resolved = resume_from.resolve()
             if not resolved.exists():
-                raise ValueError(f"resume directory does not exist: {resolved}")
+                self._fail_setup(f"resume directory does not exist: {resolved}")
             self.exp_root = resolved
         else:
-            self.exp_root = create_results_root()
+            try:
+                self.exp_root = create_results_root()
+            except (OSError, ValueError) as exc:
+                self._fail_setup(str(exc))
+            self._created_fresh_root = True
         self.exp_dir = self.exp_root
         self.family_dir = self.exp_dir / family
         self.results_dir = self.exp_dir / "medical_results"
+        try:
+            _validate_writable_run_tree(self.exp_dir, family)
+        except ValueError as exc:
+            self._fail_setup(str(exc))
+        self._resume_record: Optional[dict] = None
+        if self.is_resume:
+            record, _, _ = _merged_family_record(self.exp_dir, self.family)
+            if record is None:
+                self._fail_setup(
+                    f"no valid {family} metadata was found in {self.exp_dir}; "
+                    "refusing to guess which models produced this run"
+                )
+            try:
+                saved_frontier, saved_weaker, saved_concession = _saved_models(
+                    record, family
+                )
+            except ValueError as exc:
+                self._fail_setup(str(exc))
+
+            requested_models = (
+                ("frontier", frontier_model, saved_frontier),
+                ("weaker", weaker_model, saved_weaker),
+                ("concession", concession_model, saved_concession),
+            )
+            mismatches = [
+                f"{label}={requested!r} (saved {saved!r})"
+                for label, requested, saved in requested_models
+                if requested is not None
+                and (not isinstance(requested, str) or requested.strip() != saved)
+            ]
+            if mismatches:
+                self._fail_setup(
+                    "resume model selection does not match the saved run: "
+                    + "; ".join(mismatches)
+                )
+            self.frontier_model = saved_frontier
+            self.weaker_model = saved_weaker
+            self.concession_model = saved_concession
+            self._resume_record = record
+        else:
+            defaults = FAMILY_MODELS[family]
+            self.frontier_model = (
+                frontier_model.strip()
+                if isinstance(frontier_model, str) and frontier_model.strip()
+                else defaults["frontier"]
+            )
+            self.weaker_model = (
+                weaker_model.strip()
+                if isinstance(weaker_model, str) and weaker_model.strip()
+                else defaults["weaker"]
+            )
+            self.concession_model = (
+                concession_model.strip()
+                if isinstance(concession_model, str) and concession_model.strip()
+                else CONCESSION_MODEL
+            )
+
+            try:
+                (
+                    self.frontier_model,
+                    self.weaker_model,
+                    self.concession_model,
+                ) = _validate_model_trio(
+                    family,
+                    self.frontier_model,
+                    self.weaker_model,
+                    self.concession_model,
+                )
+            except ValueError as exc:
+                self._fail_setup(str(exc))
+
+        selected_models = (
+            self.frontier_model,
+            self.weaker_model,
+            self.concession_model,
+        )
+        uses_anthropic = any(model.startswith("claude-") for model in selected_models)
+        uses_openai = any(not model.startswith("claude-") for model in selected_models)
+        if uses_openai and not openai_key:
+            self._fail_setup(
+                "OpenAI API key is required because this run uses an OpenAI model."
+            )
+        if uses_anthropic and not anthropic_key:
+            self._fail_setup(
+                "Anthropic API key is required because this run uses an "
+                "Anthropic model."
+            )
+
         # Resolve the baselines source. Three cases:
         #   1. Fresh run with canonical requested + canonical fully populated
         #      → skip baseline-API stages, read from canonical.
@@ -572,64 +1529,79 @@ class DebateRun:
         #      silently change PGR denominators and confuse comparisons, so
         #      the sidebar toggle only applies to fresh runs.
         fresh_baselines_dir = self.exp_dir / "baselines" / family
-        canonical_path = CANONICAL_BASELINES_ROOT / family
+        self.baselines_read_only = False
         if self.is_resume:
-            recorded = self._read_recorded_baselines_dir()
+            recorded, recorded_is_canonical = self._read_recorded_baseline_source()
             if recorded is not None:
-                # Honour the run's recorded choice even if the directory
-                # does not exist on disk yet. The original baseline subprocess
-                # may have been killed before it created `baselines/<family>/`,
-                # but the user's intent is unchanged — and falling back to
-                # the sidebar toggle here would silently switch the baseline
-                # source. The baseline subprocess will mkdir as needed on
-                # the next pipeline pass.
-                recorded_is_canonical = recorded.resolve() == canonical_path.resolve()
-                if (
-                    recorded_is_canonical
-                    and canonical_baselines_path(
+                # Honour the saved source. Legacy absolute in-repo paths are
+                # rebased by `_read_recorded_baseline_source`, so moving or
+                # forking the checkout does not silently turn a canonical
+                # source into a fresh paid baseline run.
+                if recorded_is_canonical:
+                    canonical = canonical_baselines_path(
                         family,
+                        judges=(self.weaker_model, self.frontier_model),
                         min_rows=self.n_cases,
                         expected_ids=expected_baseline_ids,
                     )
-                    is None
-                ):
-                    # Never turn an invalid committed reference bundle into a
-                    # writable resume target. Failing here prevents both paid
-                    # downstream work and accidental changes under data/.
-                    try:
-                        self._secrets_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    shutil.rmtree(self._tempdir, ignore_errors=True)
-                    raise ValueError(
-                        "the canonical baselines recorded for this run are "
-                        f"incomplete or invalid for its first {self.n_cases} "
-                        "pilot case(s); rebuild the canonical bundle or start "
-                        "a fresh run with baseline recomputation enabled"
+                    if canonical is None:
+                        # Never turn an invalid committed reference bundle into a
+                        # writable resume target. Failing here prevents both paid
+                        # downstream work and accidental changes under data/.
+                        self._fail_setup(
+                            "the canonical baselines recorded for this run are "
+                            f"incomplete or invalid for its first {self.n_cases} "
+                            "pilot case(s); rebuild the canonical bundle or start "
+                            "a fresh run with baseline recomputation enabled"
+                        )
+                    self.baselines_dir = canonical
+                    self.using_canonical_baselines = True
+                    self.baselines_read_only = True
+                else:
+                    # A partial per-run baseline directory is a valid resume
+                    # target: the pipeline creates missing rows/files there.
+                    writable_in_run_baselines = _baseline_source_is_writable_in_run(
+                        recorded, self.exp_dir, family
                     )
-                self.baselines_dir = recorded
-                self.using_canonical_baselines = recorded_is_canonical
+                    if not writable_in_run_baselines and not recorded.exists():
+                        self._fail_setup(
+                            "the external baselines recorded for this run no "
+                            f"longer exist at {recorded}; restore them or start "
+                            "a fresh run with baseline recomputation enabled"
+                        )
+                    self.baselines_dir = recorded
+                    self.using_canonical_baselines = False
+                    if not writable_in_run_baselines:
+                        issues = missing_baseline_files(
+                            recorded,
+                            family,
+                            judges=(self.weaker_model, self.frontier_model),
+                            min_rows=self.n_cases,
+                            expected_ids=expected_baseline_ids,
+                        )
+                        if issues:
+                            preview = "; ".join(issues[:3])
+                            if len(issues) > 3:
+                                preview += f"; and {len(issues) - 3} more"
+                            self._fail_setup(
+                                "the external baselines recorded for this run are "
+                                f"incomplete or invalid for its first {self.n_cases} "
+                                f"pilot case(s): {preview}. External baselines are "
+                                "read-only during resume; restore a complete archive "
+                                "or start a fresh run with baseline recomputation enabled"
+                            )
+                        self.baselines_read_only = True
             else:
-                # Metadata didn't record a baselines_dir at all (very old run).
-                # Fall back to the current canonical/fresh logic so the resume
-                # doesn't hard-fail.
-                canonical = (
-                    canonical_baselines_path(
-                        family,
-                        min_rows=self.n_cases,
-                        expected_ids=expected_baseline_ids,
-                    )
-                    if use_canonical_baselines
-                    else None
-                )
-                self.using_canonical_baselines = canonical is not None
-                self.baselines_dir = (
-                    canonical if canonical is not None else fresh_baselines_dir
+                self._fail_setup(
+                    "resume metadata does not record a baseline source; refusing "
+                    "to guess and change this run's PGR denominator. Start a fresh "
+                    "run or repair run_metadata.json with its original baselines_dir"
                 )
         else:
             canonical = (
                 canonical_baselines_path(
                     family,
+                    judges=(self.weaker_model, self.frontier_model),
                     min_rows=self.n_cases,
                     expected_ids=expected_baseline_ids,
                 )
@@ -640,14 +1612,17 @@ class DebateRun:
             self.baselines_dir = (
                 canonical if canonical is not None else fresh_baselines_dir
             )
-        self.log_path = self._tempdir / "pipeline.log"
+            self.baselines_read_only = canonical is not None
         if not self.is_resume:
             self._write_run_metadata("app/streamlit_app.py")
         else:
             # Extend any working CSVs that already exist; the pipeline
             # itself will create the missing ones with the new n_cases.
             self.extension_report = extend_run_to_n_cases(
-                self.exp_dir, family, self.n_cases
+                self.exp_dir,
+                family,
+                self.n_cases,
+                include_baselines=not self.baselines_read_only,
             )
             # Always sync metadata to the requested n on resume — even when
             # no rows were physically appended (e.g. a prior run crashed
@@ -686,23 +1661,87 @@ class DebateRun:
         except FileNotFoundError:
             self._initial_cases = []
 
+        # Create the session key file only after every metadata, resume, and
+        # pilot-loading operation that can reject this setup has succeeded.
+        # This ordering means a corrupt saved run or an output write failure
+        # cannot orphan credentials for an object that is never returned.
+        self._create_session_temp_files(openai_key, anthropic_key)
+
     # ---------------------------------------------------------------- lifecycle
 
-    def _read_recorded_baselines_dir(self) -> Optional[Path]:
-        """Return the `baselines_dir` recorded in this exp dir's metadata,
-        or None if absent. Used on resume so the runner honours the
-        run's original baseline source instead of silently picking up
-        whatever the sidebar toggle currently says.
-        """
-        family_meta = self.family_dir / "run_metadata.json"
-        if not family_meta.exists():
-            return None
+    def _create_session_temp_files(self, openai_key: str, anthropic_key: str) -> None:
+        """Create private session storage, cleaning it on every failure."""
         try:
-            doc = json.loads(family_meta.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return None
-        recorded = doc.get("baselines_dir")
-        return Path(recorded) if recorded else None
+            self._tempdir = Path(tempfile.mkdtemp(prefix="medical_debate_app_"))
+            self._secrets_path = self._tempdir / "SECRETS"
+            payload = "\n".join(
+                [
+                    f"API_KEY={openai_key}",
+                    f"ANTHROPIC_API_KEY={anthropic_key or ''}",
+                    "DEFAULT_ORG=",
+                    "",
+                ]
+            )
+
+            # Set 0600 at creation time rather than writing first and chmodding
+            # afterwards, so there is no interval with broader permissions.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor: Optional[int] = os.open(self._secrets_path, flags, 0o600)
+            try:
+                stream = os.fdopen(descriptor, "w", encoding="utf-8")
+                descriptor = None
+                with stream:
+                    stream.write(payload)
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+            self.log_path = self._tempdir / "pipeline.log"
+        except BaseException:
+            # Includes cancellation signals such as KeyboardInterrupt and
+            # SystemExit: no failure after key creation may leave credentials.
+            self._discard_setup_artifacts()
+            raise
+
+    def _discard_setup_artifacts(self) -> None:
+        """Best-effort cleanup for a constructor that will not return."""
+        secrets_path = getattr(self, "_secrets_path", None)
+        if isinstance(secrets_path, Path):
+            try:
+                secrets_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        tempdir = getattr(self, "_tempdir", None)
+        if isinstance(tempdir, Path):
+            shutil.rmtree(tempdir, ignore_errors=True)
+        if getattr(self, "_created_fresh_root", False):
+            try:
+                self.exp_root.rmdir()
+            except OSError:
+                # Only remove the empty results directory this constructor
+                # just created. If anything reached it, leave it untouched.
+                pass
+
+    def _fail_setup(self, message: str) -> None:
+        """Remove session secrets before rejecting an unsafe run setup."""
+        self._discard_setup_artifacts()
+        raise ValueError(message)
+
+    def _read_recorded_baseline_source(
+        self,
+    ) -> tuple[Optional[Path], Optional[bool]]:
+        """Return the same merged baseline source shown by discovery."""
+        record, recorded_run_root, _ = _merged_family_record(self.exp_dir, self.family)
+        if self._resume_record is not None:
+            record = self._resume_record
+        if record is not None:
+            return _baseline_source_from_record(
+                record,
+                self.exp_dir,
+                self.family,
+                recorded_run_root=recorded_run_root,
+            )
+        return None, None
 
     def _update_run_metadata_for_extension(self) -> None:
         """Bump n_cases + last_updated_at_utc in run_metadata.json after
@@ -712,50 +1751,58 @@ class DebateRun:
         absent, so very old metadata gains the explicit fields once
         touched.
         """
+        _validate_writable_run_tree(
+            self.exp_dir,
+            self.family,
+            include_baselines=not self.baselines_read_only,
+        )
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        merged_record, _, _ = _merged_family_record(self.exp_dir, self.family)
         family_meta = self.family_dir / "run_metadata.json"
-        if family_meta.exists():
-            try:
-                doc = json.loads(family_meta.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                doc = {}
-            doc["n_cases"] = self.n_cases
-            doc["last_updated_at_utc"] = now
-            doc.setdefault("baselines_dir", str(self.baselines_dir))
-            doc.setdefault(
-                "using_canonical_baselines", bool(self.using_canonical_baselines)
-            )
-            family_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        # Write one fully healed effective record to both metadata locations.
+        # Starting from a merely non-empty family copy would otherwise leave
+        # its missing model/entrypoint/timestamp fields missing forever.
+        doc = dict(merged_record or {})
+        doc["family"] = self.family
+        doc["n_cases"] = self.n_cases
+        doc["frontier_model"] = self.frontier_model
+        doc["weaker_model"] = self.weaker_model
+        doc["concession_model"] = self.concession_model
+        doc["last_updated_at_utc"] = now
+        doc["family_dir"] = _portable_metadata_path(self.family_dir)
+        doc["baselines_dir"] = _portable_metadata_path(self.baselines_dir)
+        doc["using_canonical_baselines"] = bool(self.using_canonical_baselines)
+        self.family_dir.mkdir(parents=True, exist_ok=True)
+        family_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
         root_meta = self.exp_dir / "run_metadata.json"
-        if root_meta.exists():
-            try:
-                doc = json.loads(root_meta.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                doc = {}
-            doc["last_updated_at_utc"] = now
-            families = doc.setdefault("families", {})
-            f = families.setdefault(self.family, {})
-            f["n_cases"] = self.n_cases
-            f["last_updated_at_utc"] = now
-            f.setdefault("baselines_dir", str(self.baselines_dir))
-            f.setdefault(
-                "using_canonical_baselines", bool(self.using_canonical_baselines)
-            )
-            root_meta.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        root_doc = _load_json_dict(root_meta) or {}
+        root_doc["run_root"] = _portable_metadata_path(self.exp_dir)
+        root_doc.setdefault("created_or_updated_at_utc", now)
+        root_doc["last_updated_at_utc"] = now
+        families = root_doc.get("families")
+        if not isinstance(families, dict):
+            families = {}
+            root_doc["families"] = families
+        families[self.family] = dict(doc)
+        root_meta.write_text(json.dumps(root_doc, indent=2) + "\n", encoding="utf-8")
 
     def _write_run_metadata(self, entrypoint: str) -> None:
-        models = FAMILY_MODELS[self.family]
+        _validate_writable_run_tree(
+            self.exp_dir,
+            self.family,
+            include_baselines=not self.baselines_read_only,
+        )
         recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         family_record = {
             "family": self.family,
             "n_cases": self.n_cases,
-            "frontier_model": models["frontier"],
-            "weaker_model": models["weaker"],
+            "frontier_model": self.frontier_model,
+            "weaker_model": self.weaker_model,
             "concession_model": self.concession_model,
             "entrypoint": entrypoint,
-            "family_dir": str(self.family_dir),
-            "baselines_dir": str(self.baselines_dir),
+            "family_dir": _portable_metadata_path(self.family_dir),
+            "baselines_dir": _portable_metadata_path(self.baselines_dir),
             "using_canonical_baselines": bool(self.using_canonical_baselines),
             "recorded_at_utc": recorded_at,
         }
@@ -765,7 +1812,7 @@ class DebateRun:
             encoding="utf-8",
         )
         root_record = {
-            "run_root": str(self.exp_dir),
+            "run_root": _portable_metadata_path(self.exp_dir),
             "created_or_updated_at_utc": recorded_at,
             "last_updated_at_utc": recorded_at,
             "families": {self.family: family_record},
@@ -776,14 +1823,27 @@ class DebateRun:
         )
 
     def start(self) -> None:
-        with self._lock:
-            if self._thread is not None:
-                return
-            self._phase = Phase.BASELINES
-            self._message = "Running blind + oracle baselines."
-            self._started_at = time.time()
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
+        try:
+            with self._lock:
+                if self._thread is not None:
+                    return
+                self._phase = Phase.BASELINES
+                self._message = "Running blind + oracle baselines."
+                self._started_at = time.time()
+                self._thread = threading.Thread(target=self._run, daemon=True)
+                self._thread.start()
+        except BaseException:
+            # If the OS cannot create the worker thread, the run never reaches
+            # Streamlit session state and therefore cannot be cleared from the
+            # UI. Remove credentials here at the lifecycle boundary before the
+            # original error is surfaced to the user.
+            with self._lock:
+                self._thread = None
+                self._phase = Phase.ERROR
+                self._message = "Failed to start the background worker."
+                self._finished_at = time.time()
+            self._discard_setup_artifacts()
+            raise
 
     def stop(self) -> None:
         """Signal stop and escalate from SIGTERM → SIGKILL if the subprocess
@@ -795,12 +1855,18 @@ class DebateRun:
             self._stop_requested = True
             proc = self._proc
 
-        if proc is None or proc.poll() is not None:
+        if proc is None:
+            return
+        self._request_process_stop(proc)
+
+    def _request_process_stop(self, proc: subprocess.Popen) -> None:
+        """Terminate one owned subprocess and escalate without blocking UI."""
+        if proc.poll() is not None:
             return
 
         def _signal(sig: int) -> None:
             try:
-                if os.name == "posix":
+                if os.name == "posix" and getattr(proc, "pid", None) is not None:
                     os.killpg(os.getpgid(proc.pid), sig)
                 else:
                     proc.terminate()
@@ -835,6 +1901,14 @@ class DebateRun:
             shutil.rmtree(self._tempdir, ignore_errors=True)
         except Exception:
             pass
+
+    def _delete_sensitive_temp_files(self) -> None:
+        """Remove session credentials and provider prompt caches promptly."""
+        try:
+            self._secrets_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        shutil.rmtree(self._tempdir / "prompt_history", ignore_errors=True)
 
     # ---------------------------------------------------------------- snapshot
 
@@ -897,13 +1971,15 @@ class DebateRun:
         # Layer in final-judge answers for any arm directory that exists.
         debate_sim = self.family_dir / "debate_sim"
         if debate_sim.exists():
-            for sub in sorted(debate_sim.iterdir()):
-                if not sub.is_dir() or sub.name.startswith("concession_"):
-                    continue
-                condition = next(
-                    (c for c in CONDITIONS if sub.name.startswith(c + "_")), None
-                )
-                if condition is None:
+            judge_for_condition = {
+                "e1_info_asymmetry": self.frontier_model,
+                "e2_double_asymmetry": self.weaker_model,
+                "e3_capability_asymmetry": self.weaker_model,
+                "e4_full_symmetry": self.frontier_model,
+            }
+            for condition, judge_model in judge_for_condition.items():
+                sub = debate_sim / f"{condition}_{judge_model}"
+                if not sub.is_dir() or sub.is_symlink():
                     continue
                 for fname, swap in (
                     ("data0_judgement.csv", False),
@@ -921,8 +1997,11 @@ class DebateRun:
                         if not case_id or case_id not in cases:
                             continue
                         bucket = cases[case_id].arm_answers.setdefault(condition, {})
-                        bucket["swap" if swap else "orig"] = str(
-                            row.get("answer_judge", "")
+                        order = "swap" if swap else "orig"
+                        bucket[order] = str(row.get("answer_judge", ""))
+                        complete_value = row.get("complete_judge", False)
+                        bucket[f"{order}_complete"] = complete_value is True or (
+                            str(complete_value).strip().lower() == "true"
                         )
 
         return list(cases.values())
@@ -960,9 +2039,15 @@ class DebateRun:
         """Spawn one subprocess, stream its output to the in-memory tail,
         and return its exit code. Honours stop requests.
         """
+        _validate_writable_run_tree(
+            self.exp_dir,
+            self.family,
+            include_baselines=not self.baselines_read_only,
+        )
         self._append_log(f"$ {' '.join(cmd[:2])} … ({label})")
 
         env = os.environ.copy()
+        env["MEDICAL_DEBATE_APP_RUNNER"] = "1"
         env["MEDICAL_DEBATE_SECRETS_PATH"] = str(self._secrets_path)
         env["MEDICAL_DEBATE_PROMPT_HISTORY_DIR"] = str(self._tempdir / "prompt_history")
         # The pipeline's matplotlib plots run headless; give them a private cache.
@@ -980,9 +2065,20 @@ class DebateRun:
         if os.name == "posix":
             popen_kwargs["start_new_session"] = True  # so we can SIGTERM the group
 
+        # This is intentionally the final operation before Popen. A stop that
+        # already happened must not start another paid stage.
+        with self._lock:
+            if self._stop_requested:
+                return 1
         proc = subprocess.Popen(cmd, **popen_kwargs)
         with self._lock:
             self._proc = proc
+            stop_raced = self._stop_requested
+        # A stop can land after the preflight check while Popen is creating the
+        # child. Once the process is published, terminate that just-launched
+        # child immediately rather than leaving it detached and billable.
+        if stop_raced:
+            self._request_process_stop(proc)
 
         assert proc.stdout is not None
         try:
@@ -998,7 +2094,8 @@ class DebateRun:
             proc.stdout.close()
             rc = proc.wait()
             with self._lock:
-                self._proc = None
+                if self._proc is proc:
+                    self._proc = None
         return rc
 
     def _python(self) -> str:
@@ -1009,22 +2106,136 @@ class DebateRun:
     def _hydra_exp_dir(self, path: Path) -> str:
         """Return an exp_dir override value Hydra can parse.
 
-        Hydra's override grammar treats spaces and parentheses in absolute
-        paths as syntax. The app always writes under the repo's exp/
-        directory, so pass a repo-relative path to subprocesses.
+        Hydra's override grammar treats spaces, parentheses and several other
+        characters as syntax. Prefer a repo-relative path, then quote and
+        escape the value so an explicitly selected external resume directory
+        is safe too.
         """
         try:
-            return path.relative_to(REPO_ROOT).as_posix()
+            value = path.relative_to(REPO_ROOT).as_posix()
         except ValueError:
-            return path.as_posix()
+            value = path.as_posix()
+        if _path_has_unsafe_hydra_syntax(Path(value)):
+            raise ValueError(f"unsafe Hydra path syntax: {value!r}")
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+        return f"'{escaped}'"
+
+    def _combined_analysis_inputs(self) -> tuple[list[Path], Path]:
+        """Build read-only, family-aware inputs for aggregate/stat stages.
+
+        A run root may contain OpenAI and Anthropic outputs whose baselines
+        come from different canonical, in-run, or external roots. The internal
+        analysis utilities accept only one baseline root, so expose each
+        validated source via a temporary ``<root>/<family>`` symlink. This
+        keeps archived baselines read-only and prevents resuming one family
+        from erasing the other from the shared derived tables.
+        """
+        family_dirs: list[Path] = []
+        baseline_sources: dict[str, Path] = {}
+
+        for family in FAMILY_MODELS:
+            family_dir = self.exp_dir / family
+            if family_dir.exists() or family_dir.is_symlink():
+                family_issue = _writable_run_tree_issue(self.exp_dir, family)
+                if family_issue is not None:
+                    raise RuntimeError(
+                        f"cannot safely inspect sibling {family}: {family_issue}"
+                    )
+            record, recorded_run_root, _ = _merged_family_record(self.exp_dir, family)
+
+            if family == self.family:
+                record = record or self._resume_record
+                if record is None:
+                    raise RuntimeError(
+                        f"cannot aggregate {family}: its run metadata is missing"
+                    )
+                family_dirs.append(family_dir)
+                baseline_source = self.baselines_dir
+                frontier, weaker = self.frontier_model, self.weaker_model
+                n_cases = self.n_cases
+            else:
+                debate_root = family_dir / "debate_sim"
+                if not debate_root.exists():
+                    continue
+                if record is None:
+                    if any(debate_root.rglob("*_judgement.csv")):
+                        raise RuntimeError(
+                            f"cannot safely preserve sibling {family} results: "
+                            "their metadata is missing or has a family mismatch"
+                        )
+                    continue
+                available_ids = _family_output_case_ids(self.exp_dir, family, record)
+                if available_ids is None:
+                    raise RuntimeError(
+                        f"cannot safely preserve sibling {family} results: "
+                        "their cached judgement case IDs are malformed or do "
+                        "not match the saved pilot cohort"
+                    )
+                if not available_ids:
+                    continue
+                if not _family_outputs_are_complete(self.exp_dir, family, record):
+                    self._append_log(
+                        f"[runner] preserving partial sibling {family} output "
+                        f"for {len(available_ids)} available case(s)"
+                    )
+                frontier, weaker, _ = _saved_models(record, family)
+                baseline_source, _ = _baseline_source_from_record(
+                    record,
+                    self.exp_dir,
+                    family,
+                    recorded_run_root=recorded_run_root,
+                )
+                if baseline_source is None:
+                    raise RuntimeError(
+                        f"cannot safely preserve available sibling {family} results: "
+                        "their baseline source is missing from metadata"
+                    )
+                family_dirs.append(family_dir)
+                expected_ids = available_ids
+
+            if family == self.family:
+                expected_ids = pilot_case_ids(n_cases)
+            issues = missing_baseline_files(
+                baseline_source,
+                family,
+                judges=(weaker, frontier),
+                min_rows=len(expected_ids),
+                expected_ids=expected_ids,
+            )
+            if issues:
+                preview = "; ".join(issues[:3])
+                if len(issues) > 3:
+                    preview += f"; and {len(issues) - 3} more"
+                raise RuntimeError(
+                    f"cannot safely aggregate {family}: its saved baselines are "
+                    f"incomplete or invalid ({preview})"
+                )
+            baseline_sources[family] = baseline_source
+
+        view = self._tempdir / "analysis_baselines"
+        view.mkdir(exist_ok=True)
+        for family, source in baseline_sources.items():
+            link = view / family
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(source.resolve(), target_is_directory=True)
+
+        self._append_log(
+            "[runner] combined analysis families="
+            + ",".join(path.name for path in family_dirs)
+            + "; baseline sources="
+            + ", ".join(
+                f"{family}:{source}" for family, source in baseline_sources.items()
+            )
+        )
+        return family_dirs, view
 
     def _run(self) -> None:
         try:
             py = self._python()
             family = self.family
             n = self.n_cases
-            models = FAMILY_MODELS[family]
-            frontier, weaker = models["frontier"], models["weaker"]
+            frontier, weaker = self.frontier_model, self.weaker_model
             limit_arg = f"++limit={n}"
             cases_at_a_time = CASES_AT_A_TIME[family]
             judge_threads_arg = f"++anthropic_num_threads={cases_at_a_time}"
@@ -1035,13 +2246,18 @@ class DebateRun:
             )
 
             # ---- Baselines (blind + oracle) ---------------------------------
-            if self.using_canonical_baselines:
+            if self.baselines_read_only:
+                source_label = (
+                    "canonical" if self.using_canonical_baselines else "external"
+                )
                 self._set_phase(
                     Phase.BASELINES,
-                    f"Using canonical baselines at {self.baselines_dir.relative_to(REPO_ROOT)} (no API spend).",
+                    f"Using validated {source_label} baselines at "
+                    f"{self.baselines_dir} (no baseline API spend).",
                 )
                 self._append_log(
-                    f"[runner] skipping baseline stage; aggregator will read from {self.baselines_dir}"
+                    f"[runner] skipping baseline stage; validated {source_label} "
+                    f"baselines are read-only at {self.baselines_dir}"
                 )
             else:
                 self._set_phase(
@@ -1055,7 +2271,7 @@ class DebateRun:
                 # against the first judge to satisfy Hydra's required
                 # config, then loop core.judge + core.scoring.accuracy over
                 # both models.
-                baseline_judges = [weaker, frontier]
+                baseline_judges = list(dict.fromkeys((weaker, frontier)))
                 for arm in ("medical_blind", "medical_oracle"):
                     if self._stop_check():
                         self._finalise(Phase.STOPPED, "Stopped by user.")
@@ -1234,14 +2450,15 @@ class DebateRun:
             if outcome is not None:
                 self._finalise(Phase.ERROR, outcome.removeprefix("error: "))
                 return
+            family_dirs, analysis_baselines = self._combined_analysis_inputs()
             rc = self._run_stage(
                 "aggregate",
                 [
                     py,
                     "scripts/aggregate_medical_results.py",
-                    str(self.family_dir),
+                    *(str(path) for path in family_dirs),
                     "--baselines-dir",
-                    str(self.baselines_dir),
+                    str(analysis_baselines),
                     "--out-dir",
                     str(self.results_dir),
                 ],
@@ -1260,9 +2477,9 @@ class DebateRun:
                 [
                     py,
                     "scripts/compute_paired_tests.py",
-                    str(self.family_dir),
+                    *(str(path) for path in family_dirs),
                     "--baselines-dir",
-                    str(self.baselines_dir),
+                    str(analysis_baselines),
                     "--out-dir",
                     str(self.results_dir),
                 ],
@@ -1282,6 +2499,7 @@ class DebateRun:
             self._finalise(Phase.ERROR, f"Runner crashed: {exc}")
 
     def _finalise(self, phase: Phase, message: str) -> None:
+        self._delete_sensitive_temp_files()
         with self._lock:
             self._phase = phase
             self._message = message
@@ -1289,8 +2507,13 @@ class DebateRun:
             self._return_code = 0 if phase == Phase.DONE else 1
 
 
-def estimate_cost_usd(family: str, n_cases: int) -> float:
-    return COST_PER_CASE_USD.get(family, 0.4) * n_cases
+def estimate_cost_usd(
+    family: str, n_cases: int, *, include_baseline_recompute: bool = False
+) -> float:
+    per_case = COST_PER_CASE_USD.get(family, 0.4)
+    if include_baseline_recompute:
+        per_case += BASELINE_RECOMPUTE_COST_PER_CASE_USD.get(family, 0.0)
+    return per_case * n_cases
 
 
 def parse_transcript(transcript_json: str) -> Optional[dict]:

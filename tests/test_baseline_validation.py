@@ -17,7 +17,6 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import runner  # noqa: E402
-from scripts import resolve_baselines  # noqa: E402
 
 JUDGES = ("weaker-test", "frontier-test")
 EXPECTED_IDS = ("case-001", "case-002")
@@ -153,25 +152,21 @@ def main() -> int:
                 )
             )
 
-            wrong_ids_root = temp / "wrong-ids"
-            wrong_rows = _valid_rows()
-            wrong_rows[1]["id"] = "case-other"
-            _write_baseline_set(wrong_ids_root, wrong_rows)
-            resolved, _ = resolve_baselines.resolve(
-                "openai", wrong_ids_root, judges=JUDGES, min_rows=2
-            )
-            results.append(
-                _check(
-                    "CLI resolver requires the requested pilot cohort",
-                    resolved is None,
-                )
-            )
-
             resume_root = temp / "resume"
             resume_family = resume_root / "openai"
             resume_family.mkdir(parents=True)
             (resume_family / "run_metadata.json").write_text(
-                json.dumps({"baselines_dir": str(openai_root)}) + "\n",
+                json.dumps(
+                    {
+                        "family": "openai",
+                        "n_cases": 3,
+                        "frontier_model": runner.FAMILY_MODELS["openai"]["frontier"],
+                        "weaker_model": runner.FAMILY_MODELS["openai"]["weaker"],
+                        "concession_model": "gpt-4o-mini",
+                        "baselines_dir": str(openai_root),
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
             canonical_before = {

@@ -65,7 +65,7 @@ class ModelAPI:
         self,
         model_ids: Union[str, list[str]],
         prompt: Union[list[dict[str, str]], str],
-        max_tokens: int,
+        max_tokens: Optional[int],
         print_prompt_and_response: bool = False,
         n: int = 1,
         max_attempts_per_api_call: int = 10,
@@ -96,7 +96,7 @@ class ModelAPI:
         self,
         model_ids: Union[str, list[str]],
         prompt: Union[list[dict[str, str]], str],
-        max_tokens: int,
+        max_tokens: Optional[int],
         print_prompt_and_response: bool = False,
         n: int = 1,
         max_attempts_per_api_call: int = 10,
@@ -118,6 +118,7 @@ class ModelAPI:
             prompt: The prompt to send to the model(s). Type should match what's expected by the model(s).
             max_tokens: The maximum number of tokens to request from the API (argument added to
                 standardize the Anthropic and OpenAI APIs, which have different names for this).
+                If None, the selected adapter's default is used.
             print_prompt_and_response: Whether to print the prompt and response to stdout.
             n: The number of completions to request.
             max_attempts_per_api_call: Passed to the underlying API call. If the API call fails (e.g. because the
@@ -160,8 +161,11 @@ class ModelAPI:
 
         model_class = model_classes[0]
         if isinstance(model_class, AnthropicChatModel):
-            max_tokens = max_tokens if max_tokens is not None else 2000
-            kwargs["max_tokens_to_sample"] = max_tokens
+            # Leave an unspecified limit unset so the Anthropic adapter can
+            # apply its Messages-API-aware DEFAULT_MAX_TOKENS. Explicit limits
+            # continue to use the legacy bridge understood by that adapter.
+            if max_tokens is not None:
+                kwargs["max_tokens_to_sample"] = max_tokens
         else:
             if max_tokens is not None:
                 kwargs["max_tokens"] = max_tokens

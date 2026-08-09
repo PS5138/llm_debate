@@ -7,6 +7,7 @@ and concession quality-control checks.
 complete_missing_concession_judgement      0
                incomplete_or_unparsed      0
 
-Interpretation: headline debate accuracy should be read over
-usable_non_conceded debates. A large conceded or incomplete
-count means the debate framing needs revision before scaling.
+Interpretation: these counts are a separate quality-control
+diagnostic; they do not filter the headline accuracy calculation.
+A large conceded, incomplete, or malformed count means the debate
+framing or run output needs review before scaling.

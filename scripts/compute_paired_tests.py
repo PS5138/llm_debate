@@ -374,16 +374,14 @@ def main(
 
     per_case, baselines_case = load_per_case_scores(family_dirs, baselines_dir)
 
-    # These stages are non-fatal by design. This script runs late in
-    # `run_medical_debate.sh`, after the debate and judging stages have already
-    # been paid for, and `set -e` means a nonzero exit here would skip the cost
-    # summary and the transcript export. The neighbouring aggregation stage
-    # tolerates the same missing inputs, so this one matches that contract:
-    # explain loudly, write what can be written, and leave the pipeline running.
+    # This analysis runs late in the app pipeline, after debate and judging may
+    # already have incurred provider cost. Keep missing analysis inputs nonfatal
+    # so the app can still finalise and preserve its checkpoints; explain
+    # loudly and clear any stale derived outputs.
     if per_case.empty:
         print(
-            "WARNING: no debate judgement CSVs found — run the debate and "
-            "judging stages first. Skipping paired tests.",
+            "WARNING: no completed debate judgement CSVs found — resume the "
+            "run in the Streamlit app. Skipping paired tests.",
             file=sys.stderr,
         )
         _clear_stale_outputs(out_dir, "no debate judgements")

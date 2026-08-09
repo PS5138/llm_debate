@@ -1,9 +1,9 @@
 Quote verification — count and pass rate of <quote> tags
-checked against the patient evidence (verified = direct
-substring match).
+checked against the patient evidence (verified = normalized
+substring match after case, punctuation, and spacing cleanup).
 
            n_quotes  n_verified  n_unverified  pct_verified
-side                                                       
+side
 correct        1523        1523             0         100.0
 incorrect      1401        1401             0         100.0
 

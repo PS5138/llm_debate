@@ -13,6 +13,11 @@ More Truthful Answers*. The original paper studied debate on hard reading
 comprehension questions. This fork adapts the same broad oversight idea to
 synthetic medical differential diagnosis.
 
+> **Research use only.** This project uses synthetic patients to study AI
+> oversight. It is not medical advice, a diagnostic system, or clinical
+> decision support, and it must not be used to make decisions about real
+> patients.
+
 The core question is whether debate can make hidden evidence easier to judge.
 Each case has two candidate diagnoses: the true DDXPlus pathology and a
 plausible distractor from that case's differential diagnosis list. Two debaters
@@ -48,7 +53,8 @@ deliberately hard 100-case slice: adult cases, ≥20 evidence items each,
 both the true pathology and the distractor with probability ≥ 0.05 and a
 true-vs-distractor gap ≤ 0.10, picked round-robin across pathologies with
 seed `20260504`. Full filtering rules and the regeneration command live in
-[`docs/methodology.md`](docs/methodology.md).
+[`docs/methodology.md`](docs/methodology.md); dataset source, licence, and local
+rebuild instructions are in [`data/dataset_readme.md`](data/dataset_readme.md).
 
 ### Experimental arms
 
@@ -96,8 +102,8 @@ flowchart TD
 
     E1 --> G1["Blind judge calls<br/>original order and swapped order"]
     E2 --> G2["Oracle judge calls<br/>original order and swapped order"]
-    G1 --> H["baselines/results.csv"]
-    G2 --> H
+    G1 --> H1["baseline_blind/&lt;judge&gt;/<br/>data0[_swap]_judgement.csv"]
+    G2 --> H2["baseline_oracle/&lt;judge&gt;/<br/>data0[_swap]_judgement.csv"]
 
     F --> I["Round 1"]
     I --> J["Round 2"]
@@ -110,13 +116,16 @@ flowchart TD
 
     L --> M["E1-E4 final answer judges<br/>original order and swapped order"]
     L --> N["Concession judge<br/>quality-control pass"]
-    M --> O["debate_sim/*/data0_judgement.csv"]
-    N --> P["analysis/concession.csv"]
+    M --> O["debate_sim/*/data0[_swap]_judgement.csv"]
+    N --> P["debate_sim/concession_&lt;model&gt;/<br/>data0[_swap]_judgement.csv"]
     O --> Q["aggregate_medical_results.py"]
-    H --> Q
-    P --> R["analyze_medical_debate.py"]
+    H1 --> Q
+    H2 --> Q
+    L --> R["analyze_medical_debate.py"]
+    O --> R
+    P --> R
     Q --> S["medical_results/*.csv and plots"]
-    R --> T["analysis/*.csv and plots"]
+    R --> T["analysis/concession.csv<br/>and other QC artifacts"]
     S --> U["compute_paired_tests.py"]
     T --> U
     U --> V["headline_results.csv<br/>paired_tests.csv<br/>quality_control_summary.csv"]
@@ -179,15 +188,16 @@ cache files, and full transcripts; each curated bundle in `results/`
 contains the aggregate tables, plots, paired significance tests, and bias
 diagnostics needed to evaluate the run.
 
-Every table in a curated bundle is script-generated from a run's cached
-judgement CSVs — none of it is assembled by hand. Those judgements live under
-`exp/`, which is gitignored, so re-running the analysis requires a run of your
-own: the analysis layer itself costs nothing, but the debate transcripts that
-feed it do. What a fresh clone *does* get for free are the committed canonical
-baselines, which supply the blind and oracle floor and ceiling for PGR without
-re-running either. Paired statistics — case-paired bootstrap, sign-flip
-permutation, and Holm correction — are defined once in
-`scripts/medical_stats.py`; see
+The headline tables and plots are produced deterministically from a run's
+cached judgement CSVs, while the curated folder also contains selected analysis
+outputs and sanitized provenance metadata. The raw source run is not published:
+`exp/` is gitignored because it contains full transcripts, API logs, caches, and
+larger intermediate files. A fresh clone can inspect and validate the committed
+bundle, but cannot reconstruct every file from source judgements without first
+performing a new paid app run. Such a run is a replication, not a byte-for-byte
+rebuild, because model generation is stochastic. Paired statistics —
+case-paired bootstrap, sign-flip permutation, and Holm correction — are defined
+once in `scripts/medical_stats.py`; see
 [`docs/methodology.md`](docs/methodology.md#paired-statistics).
 
 ### OpenAI 100-case run
@@ -345,27 +355,14 @@ robustness claim.
 ### Requirements
 
 - Python 3.11.
-- A Unix-like shell.
 - OpenAI API access (required even for Anthropic-only runs, because the
   concession judge uses `gpt-4o-mini`).
 - Anthropic API access if running the Anthropic family.
-- The committed DDXPlus pilot CSV, or local raw DDXPlus release files if
-  you want to rebuild it.
+- The committed DDXPlus pilot CSV, included in this repository.
 
 The OpenAI adapter is pinned to the legacy `openai==0.28.0` SDK in
 `requirements.txt`; do not upgrade to `openai>=1.x` until
 `core/llm_api/openai_llm.py` has been migrated.
-
-Secrets live in a top-level `SECRETS` file (gitignored):
-
-```text
-API_KEY=<openai-key>
-ANTHROPIC_API_KEY=<anthropic-key>
-DEFAULT_ORG=
-```
-
-Keep the `DEFAULT_ORG=` and `ANTHROPIC_API_KEY=` lines even if empty —
-the shared secrets loader expects both keys to exist.
 
 ### Install
 
@@ -375,33 +372,38 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 make hooks   # optional pre-commit hooks
-make test    # local no-API parser regression test
+make test    # local no-API regression suite
 ```
 
-### Two ways to run
+### Run the Streamlit app
 
-**Interactive frontend** — live row-by-row debate viewer, BYO key,
-session-scoped tempfiles, suited to exploration and chunked
-review-as-you-go workflows.
+The Streamlit frontend is the **only supported way to launch an experiment**.
+The command below starts the local web app on the loopback interface; model
+family, case count, baseline choice, API keys, confirmation, stopping, and
+resume/extension are all handled in the UI.
 
 ```bash
-streamlit run app/streamlit_app.py
+.venv/bin/python -m streamlit run app/streamlit_app.py --server.address=127.0.0.1
 ```
 
-**One-command CLI** — the full
-`baselines → debate → E1-E4 → concession → analysis → aggregation`
-pipeline:
+Paste keys into the password fields in the sidebar. They are written only to a
+permission-restricted, session-scoped temporary file for the duration of the
+run; do not create a repository `SECRETS` file. The UI shows a planning estimate
+and requires two clicks before paid provider calls begin. Start with 1–3 cases.
+Canonical baselines are reused by default; the optional recomputation toggle
+adds both cost and time.
 
-```bash
-./scripts/run_medical_full.sh 1   openai      # one-case smoke
-./scripts/run_medical_full.sh 100 openai      # reproduce/extend the OpenAI setup
-./scripts/run_medical_full.sh 100 anthropic   # planned Anthropic comparison
-```
+Fresh **Run** clicks write outputs into a new
+`exp/YYYY-MM-DD_HH-MM-SS_results/` folder. **Resume / extend** instead reuses the
+most recent resumable folder for the selected model family, keeps its recorded
+model choices and baseline source, and skips work already checkpointed as
+complete. The former experiment shell wrappers have been removed, and direct
+paid core-stage invocation is unsupported and blocked; the app owns validation,
+cost confirmation, metadata, checkpointing, and safe resume behavior.
 
-Both write outputs into a fresh `exp/YYYY-MM-DD_HH-MM-SS_results/`
-folder. The deep walkthrough — manual stage-by-stage runs, no-API
-re-analysis, frontend buttons and resume/extend semantics, the full
-script map — lives in [`docs/operating.md`](docs/operating.md).
+See [`docs/operating.md`](docs/operating.md) for the full app walkthrough,
+cost/resume semantics, output layout, and the narrowly scoped no-API maintenance
+tools used to inspect an existing run.
 
 ## Relationship to upstream
 

@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,121 @@ _KNOWN_CONDITIONS = (
     "e4_full_symmetry",
 )
 
+# This repository intentionally exposes one fixed experiment definition per
+# provider family.  Analysis must use the models recorded by the run, but those
+# recorded values must themselves match the supported fixed trio.  Otherwise a
+# stale judgement directory (for example, one left behind after a local model
+# experiment) could silently enter the published tables.
+_FIXED_MODEL_TRIOS = {
+    "openai": {
+        "frontier_model": "gpt-5.5",
+        "weaker_model": "gpt-5.4-mini",
+        "concession_model": "gpt-4o-mini",
+    },
+    "anthropic": {
+        "frontier_model": "claude-opus-4-6",
+        "weaker_model": "claude-sonnet-4-6",
+        "concession_model": "gpt-4o-mini",
+    },
+}
+
+_CONDITION_MODEL_ROLE = {
+    "e1_info_asymmetry": "frontier_model",
+    "e2_double_asymmetry": "weaker_model",
+    "e3_capability_asymmetry": "weaker_model",
+    "e4_full_symmetry": "frontier_model",
+}
+
+
+def _load_json_object(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid run metadata at {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid run metadata at {path}: expected a JSON object")
+    return value
+
+
+def _select_root_family_record(root_doc: dict, family_dir: Path) -> Optional[dict]:
+    """Select one family record from app-style root metadata.
+
+    Current runs also write authoritative metadata directly inside the family
+    directory.  This root-record path exists for older app runs whose metadata
+    only lived at the timestamped run root.
+    """
+    families = root_doc.get("families")
+    if not isinstance(families, dict):
+        return None
+    leaf = family_dir.name
+    candidate = families.get(leaf)
+    if isinstance(candidate, dict):
+        return candidate
+    return None
+
+
+def _family_run_spec(family_dir: Path) -> dict[str, str]:
+    """Return validated, authoritative model metadata for one family dir.
+
+    Supported metadata shapes are:
+
+    * ``<family>/run_metadata.json`` with the family record directly (the
+      current app format and the curated ``results/openai_100`` format); or
+    * ``<run>/run_metadata.json`` with a ``families`` mapping (older app runs).
+
+    Missing or contradictory metadata fails closed.  Inferring models from
+    whatever directory names happen to exist would make stale caches look like
+    current experiment output.
+    """
+    family_meta = family_dir / "run_metadata.json"
+    if family_meta.exists():
+        record = _load_json_object(family_meta)
+        if "families" in record and "family" not in record:
+            selected = _select_root_family_record(record, family_dir)
+            if selected is None:
+                raise ValueError(
+                    f"run metadata at {family_meta} has no record for "
+                    f"family directory {family_dir.name!r}"
+                )
+            record = selected
+    else:
+        root_meta = family_dir.parent / "run_metadata.json"
+        if not root_meta.exists():
+            raise ValueError(
+                f"missing run metadata for {family_dir}; analysis refuses to "
+                "infer a model trio from cached directory names"
+            )
+        root_doc = _load_json_object(root_meta)
+        selected = _select_root_family_record(root_doc, family_dir)
+        if selected is not None:
+            record = selected
+        elif root_doc.get("family") == family_dir.name:
+            record = root_doc
+        else:
+            raise ValueError(
+                f"run metadata at {root_meta} has no record for "
+                f"family directory {family_dir.name!r}"
+            )
+
+    family = record.get("family")
+    if not isinstance(family, str) or family not in _FIXED_MODEL_TRIOS:
+        raise ValueError(
+            f"unsupported or missing family in run metadata for {family_dir}: {family!r}"
+        )
+    expected = _FIXED_MODEL_TRIOS[family]
+    validated: dict[str, str] = {"family": family}
+    for key, expected_model in expected.items():
+        recorded = record.get(key)
+        if not isinstance(recorded, str) or recorded.strip() != expected_model:
+            raise ValueError(
+                f"run metadata for {family_dir} records {key}={recorded!r}; "
+                f"the fixed {family} experiment requires {expected_model!r}"
+            )
+        validated[key] = expected_model
+    return validated
+
 
 def _split_condition_dir(name: str) -> Optional[tuple[str, str]]:
     """Return (condition, judge_model) or None if the dir name isn't an
@@ -89,7 +205,20 @@ def _judge_correctness(answer_text: str, swap: bool) -> Optional[bool]:
     return None  # unparseable / ambiguous
 
 
-def _scan_family_dir(family_dir: Path, family_label: str) -> pd.DataFrame:
+def _is_explicitly_complete(value: object) -> bool:
+    """Return true only for an explicit CSV boolean ``True`` value.
+
+    A partially written judgement may already contain answer-like text while
+    ``complete_judge`` is false. Such text is diagnostic state, not a scored
+    model decision. Pandas can load mixed boolean columns as strings, so the
+    exact case-insensitive string ``"true"`` is accepted as well.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return isinstance(value, str) and value.strip().lower() == "true"
+
+
+def _scan_family_dir(family_dir: Path, spec: dict[str, str]) -> pd.DataFrame:
     """Walk one family's debate_sim/<condition>_<judge>/ directories and
     produce a long-format DataFrame: one row per (case, condition, swap).
     """
@@ -107,6 +236,11 @@ def _scan_family_dir(family_dir: Path, family_label: str) -> pd.DataFrame:
         if parsed is None:
             continue
         condition, judge = parsed
+        expected_judge = spec[_CONDITION_MODEL_ROLE[condition]]
+        if judge != expected_judge:
+            # A model-looking directory is not evidence that it belongs to the
+            # recorded run. Ignore stale/local variants deterministically.
+            continue
         for fname, swap in (
             ("data0_judgement.csv", False),
             ("data0_swap_judgement.csv", True),
@@ -116,21 +250,26 @@ def _scan_family_dir(family_dir: Path, family_label: str) -> pd.DataFrame:
                 continue
             df = pd.read_csv(p, keep_default_na=False)
             for _, r in df.iterrows():
+                if not _is_explicitly_complete(r.get("complete_judge")):
+                    continue
                 ans = r.get("answer_judge", "")
+                correct = _judge_correctness(ans, swap)
+                if correct is None:
+                    continue
                 rows.append(
                     {
-                        "family": family_label,
+                        "family": spec["family"],
                         "condition": condition,
                         "judge_model": judge,
                         "case_id": r.get("id"),
                         "swap": swap,
-                        "correct": _judge_correctness(ans, swap),
+                        "correct": correct,
                     }
                 )
     return pd.DataFrame(rows)
 
 
-def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
+def _scan_baselines(baselines_dir: Path, spec: dict[str, str]) -> pd.DataFrame:
     """Walk a baselines directory and collect per-case baseline correctness.
 
     Expected layout:
@@ -151,6 +290,11 @@ def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
         for judge_dir in sorted(arm_dir.iterdir()):
             if not judge_dir.is_dir():
                 continue
+            if judge_dir.name not in {
+                spec["weaker_model"],
+                spec["frontier_model"],
+            }:
+                continue
             for fname, swap in (
                 ("data0_judgement.csv", False),
                 ("data0_swap_judgement.csv", True),
@@ -160,15 +304,20 @@ def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
                     continue
                 df = pd.read_csv(p, keep_default_na=False)
                 for _, r in df.iterrows():
+                    if not _is_explicitly_complete(r.get("complete_judge")):
+                        continue
                     ans = r.get("answer_judge", "")
+                    correct = _judge_correctness(ans, swap)
+                    if correct is None:
+                        continue
                     rows.append(
                         {
-                            "family": family_label,
+                            "family": spec["family"],
                             "arm": "B1" if arm == "baseline_blind" else "B2",
                             "judge_model": judge_dir.name,
                             "case_id": r.get("id"),
                             "swap": swap,
-                            "correct": _judge_correctness(ans, swap),
+                            "correct": correct,
                         }
                     )
     return pd.DataFrame(rows)
@@ -176,7 +325,7 @@ def _scan_baselines(baselines_dir: Path, family_label: str) -> pd.DataFrame:
 
 def _scan_baselines_for_families(
     baselines_dir: Optional[Path],
-    family_dirs: list[Path],
+    family_specs: list[tuple[Path, dict[str, str]]],
 ) -> pd.DataFrame:
     """Collect baselines for each family.
 
@@ -184,15 +333,15 @@ def _scan_baselines_for_families(
       - a family-specific directory, e.g. run/baselines/openai
       - a parent directory with family subdirs, e.g. run/baselines
     """
-    if not baselines_dir or not family_dirs:
+    if not baselines_dir or not family_specs:
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
-    for family_dir in family_dirs:
-        family_label = _family_label_from_path(family_dir)
+    for family_dir, spec in family_specs:
+        family_label = spec["family"]
         family_baselines = baselines_dir / family_label
         target = family_baselines if family_baselines.exists() else baselines_dir
-        df = _scan_baselines(target, family_label)
+        df = _scan_baselines(target, spec)
         if not df.empty:
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -215,15 +364,18 @@ def load_per_case_scores(
     tests must not disagree with the headline accuracies about what a case
     scored.
     """
+    family_specs = [
+        (directory, _family_run_spec(directory)) for directory in family_dirs
+    ]
     per_case_all = (
         pd.concat(
-            [_scan_family_dir(d, _family_label_from_path(d)) for d in family_dirs],
+            [_scan_family_dir(directory, spec) for directory, spec in family_specs],
             ignore_index=True,
         )
-        if family_dirs
+        if family_specs
         else pd.DataFrame()
     )
-    baselines_per_case = _scan_baselines_for_families(baselines_dir, family_dirs)
+    baselines_per_case = _scan_baselines_for_families(baselines_dir, family_specs)
     return (
         _swap_average(per_case_all) if not per_case_all.empty else pd.DataFrame(),
         _swap_average(baselines_per_case)
@@ -440,8 +592,9 @@ def per_case_lift_table(
     """E3 — per case, did debate flip the answer vs baseline?
 
     Joins each per-case (debate) accuracy against the same-judge B1 baseline
-    accuracy. Emits one row per (case, condition, family). For McNemar-style
-    2x2 contingency tables the consumer can pivot on (debate>=0.5, baseline>=0.5).
+    accuracy. Emits one row per (case, condition, family). The diagnostic plot
+    preserves all three swap-averaged states (0.0 / 0.5 / 1.0); 0.5 is position
+    sensitivity, not a clean correct result.
     """
     if per_case.empty or baselines_case.empty:
         return pd.DataFrame()
@@ -657,83 +810,152 @@ def plot_pgr(pgr: pd.DataFrame, out_path: Path) -> None:
     plt.close(fig)
 
 
+_SWAP_SCORE_STATES = (0.0, 0.5, 1.0)
+
+
+def _lift_contingency(sub: pd.DataFrame) -> pd.DataFrame:
+    """Build a wrong / position-sensitive / correct transition table."""
+    counts = {
+        (blind, debate): 0
+        for blind in _SWAP_SCORE_STATES
+        for debate in _SWAP_SCORE_STATES
+    }
+    for _, row in sub.iterrows():
+        blind = next(
+            (
+                state
+                for state in _SWAP_SCORE_STATES
+                if np.isclose(row["blind_acc"], state)
+            ),
+            None,
+        )
+        debate = next(
+            (
+                state
+                for state in _SWAP_SCORE_STATES
+                if np.isclose(row["debate_acc"], state)
+            ),
+            None,
+        )
+        if blind is not None and debate is not None:
+            counts[(blind, debate)] += 1
+    return pd.DataFrame(
+        [
+            [counts[(blind, debate)] for debate in _SWAP_SCORE_STATES]
+            for blind in _SWAP_SCORE_STATES
+        ],
+        index=_SWAP_SCORE_STATES,
+        columns=_SWAP_SCORE_STATES,
+    )
+
+
+def _lift_contingencies_by_family(
+    lift: pd.DataFrame,
+) -> dict[str, dict[str, pd.DataFrame]]:
+    """Return one 3x3 transition table per family and condition.
+
+    Keeping the family split in this intermediate representation makes it hard
+    for plotting changes to accidentally pool providers.  A pooled heatmap can
+    look perfectly plausible while every cell count is wrong for both families.
+    """
+    if lift.empty:
+        return {}
+    if "family" not in lift.columns:
+        raise ValueError("per-case lift data is missing the family column")
+    tables: dict[str, dict[str, pd.DataFrame]] = {}
+    for family in sorted(lift["family"].dropna().astype(str).unique()):
+        family_rows = lift[lift["family"].astype(str) == family]
+        tables[family] = {
+            condition: _lift_contingency(
+                family_rows[family_rows["condition"] == condition].dropna(
+                    subset=["blind_acc", "debate_acc"]
+                )
+            )
+            for condition in _COND_ORDER
+        }
+    return tables
+
+
 def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
     if lift.empty:
         _remove_stale_artifact(out_path, "no per-case lift data")
         return
+    family_tables = _lift_contingencies_by_family(lift)
+    if not family_tables:
+        _remove_stale_artifact(out_path, "no family-labelled per-case lift data")
+        return
+    families = list(family_tables)
     fig, axes = plt.subplots(
-        1,
+        len(families),
         max(1, len(_COND_ORDER)),
-        figsize=(3 * len(_COND_ORDER), 3.5),
+        figsize=(3 * len(_COND_ORDER), 3.5 * len(families)),
         squeeze=False,
     )
-    for i, cond in enumerate(_COND_ORDER):
-        ax = axes[0][i]
-        sub = lift[lift["condition"] == cond]
-        if sub.empty or sub["blind_acc"].isna().all():
-            ax.set_title(_COND_LABELS[cond])
-            ax.text(
-                0.5,
-                0.5,
-                "no baseline data",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-            ax.set_xticks([])
-            ax.set_yticks([])
-            continue
-        # 2x2 contingency on >=0.5 thresholds. We build the table by direct
-        # counts instead of pd.crosstab + reindex; with n=1 a crosstab can
-        # be 1x1 and pandas refuses to set a missing bool-indexed cell.
-        #
-        # Drop cases missing a score in either arm first: `NaN >= 0.5` is
-        # False, so an unscoreable case would otherwise be plotted as one the
-        # judge got wrong.
-        sub = sub.dropna(subset=["blind_acc", "debate_acc"]).copy()
-        if sub.empty:
-            ax.set_title(_COND_LABELS[cond])
-            ax.text(
-                0.5,
-                0.5,
-                "no scoreable cases",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-            )
-            ax.set_xticks([])
-            ax.set_yticks([])
-            continue
-        sub["blind_correct"] = sub["blind_acc"] >= 0.5
-        sub["debate_correct"] = sub["debate_acc"] >= 0.5
-        counts = {
-            (False, False): 0,
-            (False, True): 0,
-            (True, False): 0,
-            (True, True): 0,
-        }
-        for _, row in sub.iterrows():
-            counts[(bool(row["blind_correct"]), bool(row["debate_correct"]))] += 1
-        ct = pd.DataFrame(
-            [
-                [counts[(False, False)], counts[(False, True)]],
-                [counts[(True, False)], counts[(True, True)]],
-            ],
-            index=[False, True],
-            columns=[False, True],
-        )
-        im = ax.imshow(ct.values, cmap="Blues")
-        for ri in range(2):
-            for ci in range(2):
+    for family_index, family in enumerate(families):
+        family_rows = lift[lift["family"].astype(str) == family]
+        for condition_index, cond in enumerate(_COND_ORDER):
+            ax = axes[family_index][condition_index]
+            sub = family_rows[family_rows["condition"] == cond]
+            if sub.empty or sub["blind_acc"].isna().all():
+                ax.set_title(_COND_LABELS[cond])
                 ax.text(
-                    ci, ri, ct.values[ri, ci], ha="center", va="center", color="black"
+                    0.5,
+                    0.5,
+                    "no baseline data",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
                 )
-        ax.set_xticks([0, 1])
-        ax.set_xticklabels(["debate wrong", "debate right"])
-        ax.set_yticks([0, 1])
-        ax.set_yticklabels(["blind wrong", "blind right"])
-        ax.set_title(_COND_LABELS[cond])
-    fig.suptitle("Per-case lift: debate vs blind baseline (2×2 per condition)")
+                ax.set_xticks([])
+                ax.set_yticks([])
+                continue
+            # Swap averaging has three meaningful outcomes: 0.0 (wrong in both
+            # orders), 0.5 (the answer changed with position), and 1.0 (correct
+            # in both orders). Keep all three states visible. Treating 0.5 as
+            # "right" would hide the position sensitivity swap judging exists
+            # to expose.
+            sub = sub.dropna(subset=["blind_acc", "debate_acc"]).copy()
+            if sub.empty:
+                ax.set_title(_COND_LABELS[cond])
+                ax.text(
+                    0.5,
+                    0.5,
+                    "no scoreable cases",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+                ax.set_xticks([])
+                ax.set_yticks([])
+                continue
+
+            ct = family_tables[family][cond]
+            ax.imshow(ct.values, cmap="Blues")
+            for ri in range(3):
+                for ci in range(3):
+                    ax.text(
+                        ci,
+                        ri,
+                        ct.values[ri, ci],
+                        ha="center",
+                        va="center",
+                        color="black",
+                    )
+            state_labels = ["wrong", "position-\nsensitive", "correct"]
+            ax.set_xticks([0, 1, 2])
+            ax.set_xticklabels(state_labels)
+            ax.set_xlabel("debate")
+            ax.set_yticks([0, 1, 2])
+            ax.set_yticklabels(state_labels)
+            ylabel = "blind"
+            if len(families) > 1 and condition_index == 0:
+                ylabel = f"{family}\n\nblind"
+            ax.set_ylabel(ylabel)
+            ax.set_title(_COND_LABELS[cond])
+    family_note = "" if len(families) == 1 else " · one row per model family"
+    fig.suptitle(
+        "Per-case lift: debate vs blind baseline (3×3 per condition)" + family_note
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -746,8 +968,8 @@ def plot_per_case_lift(lift: pd.DataFrame, out_path: Path) -> None:
 
 
 def _family_label_from_path(family_dir: Path) -> str:
-    """Best-effort: use the leaf directory name (e.g. `openai`, `anthropic`)."""
-    return family_dir.name
+    """Return the validated family recorded in authoritative run metadata."""
+    return _family_run_spec(family_dir)["family"]
 
 
 def main(

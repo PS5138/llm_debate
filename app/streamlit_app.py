@@ -2,8 +2,9 @@
 
 Bring your own API key, pick how many cases to run, watch debates fill in
 row by row, click a case to see its transcript and the judge's pick under
-each arm. Each run writes outputs to a fresh timestamped folder under exp/.
-Temporary secrets and process logs are isolated in a tempdir.
+each arm. Fresh runs write to timestamped folders under exp/; resume reuses
+the latest saved folder for the selected family. Temporary secrets and
+process logs are isolated in a tempdir.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from app.runner import (
     FAMILY_MODELS,
     DebateRun,
     Phase,
+    arm_judgement_is_complete,
     canonical_baselines_path,
     estimate_cost_usd,
     find_latest_run,
@@ -35,6 +37,8 @@ from core.scoring.accuracy import find_answer
 
 # Committed DDXPlus pilot size. Both the fresh-run and resume sliders cap here.
 PILOT_MAX_CASES = 100
+OPENAI_KEY_WIDGET = "openai_api_key"
+ANTHROPIC_KEY_WIDGET = "anthropic_api_key"
 
 CONDITION_LABEL = {
     "e1_info_asymmetry": "E1 · info asymmetry",
@@ -62,6 +66,14 @@ PHASE_PROGRESS = {
     Phase.ERROR: 1.0,
     Phase.STOPPED: 1.0,
 }
+
+
+def _display_path(path: Path) -> str:
+    """Show repo paths compactly and external paths without crashing."""
+    try:
+        return path.resolve().relative_to(REPO_ROOT.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 # --------------------------------------------------------------------------- page
@@ -96,8 +108,14 @@ def _summarise_pick(raw: str) -> str:
     """Return 'A', 'B', or '' using the project's own answer parser."""
     if not isinstance(raw, str) or not raw.strip():
         return ""
-    a = find_answer(raw, "A")
-    b = find_answer(raw, "B")
+    lowered = raw.lower()
+    if "error message:" in lowered or "error occurred" in lowered:
+        return "?"
+    try:
+        a = find_answer(raw, "A")
+        b = find_answer(raw, "B")
+    except (IndexError, TypeError, ValueError):
+        return "?"
     if a and not b:
         return "A"
     if b and not a:
@@ -114,11 +132,32 @@ def _swap_averaged_verdict(orig: str, swap: str) -> str:
         return "—"
     if not orig or not swap:
         return "partial"
+    if orig_pick not in {"A", "B"} or swap_pick not in {"A", "B"}:
+        return "unparseable"
     if orig_pick == "A" and swap_pick == "B":
         return "✓ correct"
     if orig_pick == "B" and swap_pick == "A":
         return "✗ wrong"
-    return "split"  # the two passes disagreed → A/B position bias
+    return "split"  # both parse, but agree on position rather than truth
+
+
+def _arm_display_values(answers: object) -> tuple[str, str, str]:
+    """Return live picks/verdict only for explicitly completed orderings."""
+    if not isinstance(answers, dict):
+        return "—", "—", "—"
+    orig_complete = answers.get("orig_complete") is True
+    swap_complete = answers.get("swap_complete") is True
+    orig = str(answers.get("orig", ""))
+    swap = str(answers.get("swap", ""))
+    orig_pick = (_summarise_pick(orig) or "—") if orig_complete else "—"
+    swap_pick = (_summarise_pick(swap) or "—") if swap_complete else "—"
+    if not orig_complete and not swap_complete:
+        verdict = "—"
+    elif not orig_complete or not swap_complete:
+        verdict = "partial"
+    else:
+        verdict = _swap_averaged_verdict(orig, swap)
+    return orig_pick, swap_pick, verdict
 
 
 # --------------------------------------------------------------------------- state
@@ -131,7 +170,9 @@ def _init_state() -> None:
     # `confirm_armed` flips on after the first click; second click within the
     # same configuration actually starts the run.
     st.session_state.setdefault("confirm_armed", False)
-    st.session_state.setdefault("confirm_signature", None)  # (family, n_cases)
+    st.session_state.setdefault("confirm_signature", None)
+    st.session_state.setdefault("resume_confirm_armed", False)
+    st.session_state.setdefault("resume_confirm_signature", None)
 
 
 _init_state()
@@ -143,6 +184,17 @@ def _cleanup_run() -> None:
         run.cleanup()
     st.session_state["run"] = None
     st.session_state["selected_case"] = None
+    st.session_state["confirm_armed"] = False
+    st.session_state["confirm_signature"] = None
+    st.session_state["resume_confirm_armed"] = False
+    st.session_state["resume_confirm_signature"] = None
+
+
+def _clear_run() -> None:
+    """Clear transient run state and both password-backed widget values."""
+    _cleanup_run()
+    st.session_state[OPENAI_KEY_WIDGET] = ""
+    st.session_state[ANTHROPIC_KEY_WIDGET] = ""
 
 
 # --------------------------------------------------------------------------- sidebar
@@ -155,7 +207,7 @@ with st.sidebar:
         list(FAMILY_MODELS.keys()),
         index=0,
         help="Frontier debaters / preference judge come from this family. "
-        "The concession judge uses gpt-4o-mini regardless.",
+        "Fresh runs use gpt-4o-mini for concession judging.",
     )
     models = FAMILY_MODELS[family]
     st.caption(f"Frontier: `{models['frontier']}` · Weaker judge: `{models['weaker']}`")
@@ -167,27 +219,35 @@ with st.sidebar:
     est = estimate_cost_usd(family, n_cases)
     if est >= 20:
         st.error(
-            f"Estimated cost on your own key: **~${est:0.2f}**. "
-            f"Calibrated against a May 2026 Anthropic smoke run "
-            f"(~$2.50/case ballpark on both Opus 4.6 and gpt-5.5). "
+            f"Debate/judging estimate on your own key: **~${est:0.2f}** "
+            f"before optional baseline recomputation. "
+            f"The OpenAI allowance follows gpt-5.5 pricing. The Anthropic "
+            f"allowance is provisional: an Opus 4.7 smoke run was ~$4/case; "
+            f"Opus 4.6 is budgeted lower because it has no adaptive-thinking "
+            f"overhead. "
             f"Start with 1–3 cases to confirm the pipeline works on "
             f"your account before spending more."
         )
     elif est >= 5:
         st.warning(
-            f"Estimated cost on your own key: **~${est:0.2f}**. "
+            f"Debate/judging estimate on your own key: **~${est:0.2f}** "
+            f"before optional baseline recomputation. "
             f"Real spend varies with case length and how chatty the "
             f"models feel."
         )
     else:
         st.info(
-            f"Estimated cost on your own key: **~${est:0.2f}**. "
+            f"Debate/judging estimate on your own key: **~${est:0.2f}** "
+            f"before optional baseline recomputation. "
             f"Opus 4.6 lists at $5 / $25 per million; gpt-5.5 lists at "
             f"$5 / $30. Real spend varies with case length."
         )
 
     st.divider()
     st.subheader("Baselines")
+    baseline_recompute_allowance = (
+        estimate_cost_usd(family, n_cases, include_baseline_recompute=True) - est
+    )
     canonical = canonical_baselines_path(
         family,
         min_rows=n_cases,
@@ -196,7 +256,7 @@ with st.sidebar:
     if canonical is not None:
         st.caption(
             f"Canonical baselines for **{family}** are committed at "
-            f"`{canonical.relative_to(Path.cwd())}` (100 cases, fixed "
+            f"`{_display_path(canonical)}` (100 cases, fixed "
             f"reference for PGR). By default the debate run skips the "
             f"baseline-API stage and reuses these numbers."
         )
@@ -207,9 +267,9 @@ with st.sidebar:
             "alongside the debate run, for BOTH the weaker and frontier "
             "judges (so every debate arm has a same-judge baseline for "
             "PGR). Useful if you've changed a judge model or prompt. "
-            "Adds meaningful cost — for OpenAI ~$0.15 (weaker) plus "
-            "~$1–2 (frontier) per 100 cases; for Anthropic the "
-            "frontier baseline is the dominant spend.",
+            f"Adds a planning allowance of ~${baseline_recompute_allowance:0.2f} "
+            "for this case count. For Anthropic this is deliberately "
+            "conservative because the frontier baseline dominates spend.",
         )
     else:
         st.caption(
@@ -218,17 +278,26 @@ with st.sidebar:
         )
         recompute_baselines = True
 
+    run_est = estimate_cost_usd(
+        family,
+        n_cases,
+        include_baseline_recompute=bool(recompute_baselines),
+    )
+
     st.divider()
     st.subheader("API keys (session only)")
     openai_key = st.text_input(
         "OpenAI key",
         type="password",
-        help="Always required — the concession judge uses gpt-4o-mini.",
+        key=OPENAI_KEY_WIDGET,
+        help="Required for both supported model families because concession "
+        "judging uses gpt-4o-mini.",
     )
     anthropic_key = st.text_input(
         "Anthropic key",
         type="password",
-        help="Required for the Anthropic family. Leave blank for OpenAI-only runs.",
+        key=ANTHROPIC_KEY_WIDGET,
+        help="Required for the Anthropic family. Leave blank for OpenAI runs.",
     )
 
     st.divider()
@@ -241,18 +310,22 @@ with st.sidebar:
     }
 
     # Two-click confirmation. The first click arms the button; the second
-    # click (with the same family + n_cases) actually starts the run. If
-    # the user changes settings in between, the armed state is dropped.
-    signature = (family, n_cases)
+    # click (with the same family + n_cases + baseline choice) actually starts
+    # the run. If the user changes settings in between, the armed state is
+    # dropped explicitly.
+    signature = (family, n_cases, bool(recompute_baselines))
+    if st.session_state.get("confirm_signature") != signature:
+        st.session_state["confirm_armed"] = False
+        st.session_state["confirm_signature"] = None
     confirm_armed = (
         st.session_state.get("confirm_armed", False)
         and st.session_state.get("confirm_signature") == signature
     )
 
     run_label = (
-        f"✅ Confirm: spend ~${est:0.2f}"
+        f"✅ Confirm: spend ~${run_est:0.2f}"
         if confirm_armed
-        else f"▶ Run ({n_cases} case{'s' if n_cases != 1 else ''}, ~${est:0.2f})"
+        else f"▶ Run ({n_cases} case{'s' if n_cases != 1 else ''}, ~${run_est:0.2f})"
     )
 
     col_a, col_b = st.columns(2)
@@ -271,21 +344,41 @@ with st.sidebar:
         )
 
     if confirm_armed:
-        st.caption("Click **Confirm** to start. Change any setting above to cancel.")
+        st.caption(
+            "Click **Confirm** to start. Changing the family, case count, or "
+            "baseline choice cancels confirmation."
+        )
 
     # ---- Resume or extend previous run --------------------------------
-    latest = find_latest_run() if not is_active else None
+    latest = find_latest_run(family=family) if not is_active else None
     resume_clicked = False
     resume_target_n = None
+    resume_confirm_armed = False
+    resume_signature = None
     if latest is not None:
         st.divider()
-        st.subheader("Resume / extend previous run")
+        st.subheader(f"Resume / extend previous {family} run")
         prior_n = int(latest["n_cases"])
-        st.caption(
-            f"Most recent run: `{latest['exp_dir'].name}` "
-            f"({latest['family']}, current n={prior_n}). "
-            f"Recorded {latest.get('recorded_at_utc', 'unknown')}."
+        saved_at = (
+            latest.get("last_updated_at_utc")
+            or latest.get("recorded_at_utc")
+            or "unknown"
         )
+        st.caption(
+            f"Most recent saved **{family}** run: `{latest['exp_dir'].name}` "
+            f"(current n={prior_n}). Saved {saved_at}."
+        )
+        saved_frontier = latest.get("frontier_model")
+        saved_weaker = latest.get("weaker_model")
+        saved_concession = latest.get("concession_model")
+        if saved_frontier and saved_weaker:
+            model_note = (
+                f"Resume keeps the recorded models: frontier `{saved_frontier}`, "
+                f"weaker `{saved_weaker}`"
+            )
+            if saved_concession:
+                model_note += f", concession `{saved_concession}`"
+            st.caption(model_note + ".")
         # Surface the run's original baseline source so users know that
         # the "Recompute baselines" toggle above does NOT apply on
         # resume — the original choice is preserved to keep PGR
@@ -294,7 +387,7 @@ with st.sidebar:
             source_label = (
                 "canonical (committed reference)"
                 if latest.get("using_canonical_baselines")
-                else f"per-run at `{Path(latest['baselines_dir']).relative_to(Path.cwd())}`"
+                else f"saved non-canonical source at `{_display_path(Path(latest['baselines_dir']))}`"
             )
             st.caption(
                 f"This run's baseline source is fixed at **{source_label}**. "
@@ -319,22 +412,72 @@ with st.sidebar:
                 min_value=prior_n,
                 max_value=PILOT_MAX_CASES,
                 value=prior_n,
+                key=f"resume_target_{family}_{latest['exp_dir'].name}",
                 help="Set to the same n to just retry incomplete work. Set higher "
                 "to keep the already-finished cases and add new ones up to the "
-                "new total. The pipeline writes back to the same `data0.csv` "
-                "files, so cases 1..prior_n are not re-spent on.",
+                "new total. The pipeline writes back to the same files and skips "
+                "already-complete work within each stage; unfinished debate or "
+                "judging work among earlier cases is still retried.",
             )
 
         added = resume_target_n - prior_n
-        cost_str = ""
-        if added > 0:
-            extra_cost = estimate_cost_usd(latest["family"], added)
-            cost_str = f" (~${extra_cost:0.2f} for the {added} new case{'s' if added != 1 else ''})"
+        resume_baselines_writable = bool(
+            latest.get(
+                "baselines_writable",
+                not latest.get("using_canonical_baselines", False),
+            )
+        )
+        resume_planning_cost = estimate_cost_usd(
+            latest["family"],
+            int(resume_target_n),
+            include_baseline_recompute=resume_baselines_writable,
+        )
+        resume_signature = (
+            family,
+            str(Path(latest["exp_dir"]).resolve()),
+            int(resume_target_n),
+            saved_at,
+            saved_frontier,
+            saved_weaker,
+            saved_concession,
+            str(latest.get("baselines_dir") or ""),
+            resume_baselines_writable,
+        )
+        if st.session_state.get("resume_confirm_signature") != resume_signature:
+            st.session_state["resume_confirm_armed"] = False
+            st.session_state["resume_confirm_signature"] = None
+        resume_confirm_armed = (
+            st.session_state.get("resume_confirm_armed", False)
+            and st.session_state.get("resume_confirm_signature") == resume_signature
+        )
 
-        if added == 0:
-            button_label = f"↻ Resume incomplete work at n={prior_n}"
+        if resume_confirm_armed:
+            button_label = f"✅ Confirm: budget ~${resume_planning_cost:0.2f}"
+        elif added == 0:
+            button_label = (
+                f"↻ Resume incomplete work at n={prior_n} "
+                f"(budget ~${resume_planning_cost:0.2f})"
+            )
         else:
-            button_label = f"➕ Extend from n={prior_n} to n={resume_target_n}{cost_str}"
+            button_label = (
+                f"➕ Extend from n={prior_n} to n={resume_target_n} "
+                f"(budget ~${resume_planning_cost:0.2f})"
+            )
+
+        baseline_budget_note = (
+            "This includes the baseline-recompute allowance because the saved "
+            "in-run baseline source may still have incomplete work. "
+            if resume_baselines_writable
+            else "The saved baselines are read-only, so no baseline API spend is included. "
+        )
+        resume_warning = (
+            f"Full-rerun planning estimate: ~${resume_planning_cost:0.2f} if no "
+            f"saved work can be reused across the {resume_target_n} target cases. "
+            + baseline_budget_note
+            + f"Already-complete work is skipped, so resume spend should usually be "
+            f"lower; token usage and retries can still move the actual total."
+        )
+        st.warning(resume_warning)
 
         st.caption(
             "Resume re-launches the pipeline against the existing folder. "
@@ -343,11 +486,31 @@ with st.sidebar:
             "the API. Extension grows the working CSVs in place rather than "
             "starting a fresh folder."
         )
-        resume_clicked = st.button(
+        resume_button_clicked = st.button(
             button_label,
             disabled=is_active,
             width="stretch",
+            key=f"resume_{family}_{latest['exp_dir'].name}",
         )
+        if resume_confirm_armed:
+            st.caption(
+                "Click **Confirm** to resume this exact run and target. "
+                "Changing the family, saved run, or target cancels confirmation."
+            )
+        if resume_button_clicked:
+            if not resume_confirm_armed:
+                st.session_state["resume_confirm_armed"] = True
+                st.session_state["resume_confirm_signature"] = resume_signature
+                st.session_state["confirm_armed"] = False
+                st.session_state["confirm_signature"] = None
+                st.rerun()
+            else:
+                st.session_state["resume_confirm_armed"] = False
+                st.session_state["resume_confirm_signature"] = None
+                resume_clicked = True
+    else:
+        st.session_state["resume_confirm_armed"] = False
+        st.session_state["resume_confirm_signature"] = None
 
     st.caption(
         "Stop cancels the current run. If you click Run again afterwards, "
@@ -355,23 +518,23 @@ with st.sidebar:
         "than resuming partial work."
     )
 
-    reset_clicked = st.button("Clear run (keep exp outputs)", width="stretch")
+    st.button(
+        "Clear run (keep exp outputs)",
+        width="stretch",
+        on_click=_clear_run,
+    )
 
     st.divider()
     st.caption(
         "Keys live in this session only. They are written to a "
-        "tempfile inside the run tempdir. Clear run stops the run and "
-        "deletes the temp secrets/logs, while leaving the run outputs "
-        "under exp/. Nothing is sent anywhere except the chosen model "
-        "providers."
+        "tempfile inside the run tempdir. Clear run stops the run, clears "
+        "both key fields, and deletes the temp secrets/logs, while leaving "
+        "the run outputs under exp/. Nothing is sent anywhere except the "
+        "chosen model providers."
     )
 
 
 # --------------------------------------------------------------------------- actions
-
-if reset_clicked:
-    _cleanup_run()
-    st.rerun()
 
 if stop_clicked and run is not None:
     run.stop()
@@ -382,6 +545,8 @@ if start_clicked:
         # next rerender.
         st.session_state["confirm_armed"] = True
         st.session_state["confirm_signature"] = signature
+        st.session_state["resume_confirm_armed"] = False
+        st.session_state["resume_confirm_signature"] = None
         st.rerun()
     else:
         # Second click: actually launch.
@@ -400,19 +565,24 @@ if start_clicked:
             st.session_state["run"] = new_run
             st.session_state["selected_case"] = None
             st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
+        except (OSError, RuntimeError, ValueError) as exc:
+            st.error(f"Could not start the run: {exc}")
 
 if resume_clicked and latest is not None:
     _cleanup_run()
     try:
         new_run = DebateRun(
             family=latest["family"],
-            n_cases=int(resume_target_n)
-            if resume_target_n is not None
-            else latest["n_cases"],
+            n_cases=(
+                int(resume_target_n)
+                if resume_target_n is not None
+                else latest["n_cases"]
+            ),
             openai_key=openai_key.strip(),
             anthropic_key=anthropic_key.strip(),
+            frontier_model=latest["frontier_model"],
+            weaker_model=latest["weaker_model"],
+            concession_model=latest["concession_model"],
             resume_from=latest["exp_dir"],
             use_canonical_baselines=not recompute_baselines,
         )
@@ -428,8 +598,8 @@ if resume_clicked and latest is not None:
         st.session_state["run"] = new_run
         st.session_state["selected_case"] = None
         st.rerun()
-    except ValueError as exc:
-        st.error(str(exc))
+    except (OSError, RuntimeError, ValueError) as exc:
+        st.error(f"Could not resume the run: {exc}")
 
 
 # --------------------------------------------------------------------------- header
@@ -441,6 +611,10 @@ st.markdown(
     "This page runs the pipeline live on your key and shows debates as they finish. "
     "[Project README](https://github.com/PS5138/llm_debate#readme) · methodology, arms, and caveats."
 )
+st.warning(
+    "Research demo using synthetic patients. Not medical advice, a diagnostic "
+    "system, or clinical decision support. Do not use it for real-patient decisions."
+)
 
 
 # --------------------------------------------------------------------------- live view
@@ -449,7 +623,8 @@ run = st.session_state.get("run")
 if run is None:
     st.info(
         "Pick a family and a case count in the sidebar, paste your key(s), and hit **Run**. "
-        "Default is 3 cases on `gpt-5.4-mini` to keep cost predictable."
+        "The default is 3 cases. OpenAI uses `gpt-5.5` for debaters and E1/E4, "
+        "with `gpt-5.4-mini` as the E2/E3 judge."
     )
     st.stop()
 
@@ -491,7 +666,9 @@ for c in snap.cases:
     else:
         status = "pending"
 
-    arms_done = sum(1 for cond in CONDITIONS if c.arm_answers.get(cond))
+    arms_done = sum(
+        1 for cond in CONDITIONS if arm_judgement_is_complete(c.arm_answers.get(cond))
+    )
     case_rows.append(
         {
             "case_id": c.case_id,
@@ -499,9 +676,9 @@ for c in snap.cases:
             "arms judged": f"{arms_done}/4",
             "correct (hidden)": c.correct,
             "distractor": c.distractor,
-            "question": (c.question[:120] + "…")
-            if len(c.question) > 120
-            else c.question,
+            "question": (
+                (c.question[:120] + "…") if len(c.question) > 120 else c.question
+            ),
         }
     )
 
@@ -532,9 +709,11 @@ selected = (
     st.selectbox(
         "Pick a case to read its debate",
         case_ids,
-        index=case_ids.index(st.session_state["selected_case"])
-        if st.session_state.get("selected_case") in case_ids
-        else 0,
+        index=(
+            case_ids.index(st.session_state["selected_case"])
+            if st.session_state.get("selected_case") in case_ids
+            else 0
+        ),
         key="selected_case",
     )
     if case_ids
@@ -576,14 +755,12 @@ if selected:
         rows = []
         for cond in CONDITIONS:
             answers = case.arm_answers.get(cond, {})
-            orig = answers.get("orig", "")
-            swap = answers.get("swap", "")
-            verdict = _swap_averaged_verdict(orig, swap)
+            orig_pick, swap_pick, verdict = _arm_display_values(answers)
             rows.append(
                 {
                     "arm": CONDITION_LABEL[cond],
-                    "orig pick": _summarise_pick(orig) or "—",
-                    "swap pick": _summarise_pick(swap) or "—",
+                    "orig pick": orig_pick,
+                    "swap pick": swap_pick,
                     "result": verdict,
                 }
             )

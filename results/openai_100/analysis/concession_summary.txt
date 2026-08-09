@@ -5,6 +5,7 @@ opposing side.
 n debates: 100
 concession rate: 0.00%
 
-Interpretation: > 20% on the incorrect-side debater means
-the framing is failing and the headline E1/E2 numbers for
-that family should be held back.
+Interpretation: if > 20% of debates are flagged for either
+side, the framing is failing. Because E1-E4 judge the same
+debate transcripts, that family's headline arms should be
+held back pending review.

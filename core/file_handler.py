@@ -1,8 +1,32 @@
 import random
+import re
 from enum import StrEnum
 from pathlib import Path
 
 from core.utils import load_yaml_cached
+
+_SAFE_PATH_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$")
+
+
+def _validated_path_component(value: object, label: str) -> str:
+    """Return a single safe output-directory component.
+
+    Judge names originate in Hydra configuration and are used as directory
+    names.  They must not be able to introduce interpolation syntax, control
+    characters, or path traversal even if this lower-level module is called
+    outside the Streamlit runner.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    if (
+        not _SAFE_PATH_COMPONENT.fullmatch(value)
+        or "${" in value
+        or Path(value).name != value
+        or value in {".", ".."}
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError(f"unsafe {label} path component: {value!r}")
+    return value
 
 
 class Method(StrEnum):
@@ -66,20 +90,55 @@ class Experiment:
         return dir
 
     def get_debate_filename(self, seed=0, swap=False) -> Path:
-        dirs = self.get_debate_root()
+        dirs = _validated_path_component(self.get_debate_root(), "experiment")
         file = f"data{seed}.csv" if not swap else f"data{seed}_swap.csv"
-        return self.exp_dir / dirs / file
+        return self._validated_output_path(self.exp_dir / dirs / file)
 
     def get_judge_filename(
         self, judge_model, seed=0, swap=False, exp_suffix=""
     ) -> Path:
-        dirs = self.get_debate_root()
+        dirs = _validated_path_component(self.get_debate_root(), "experiment")
+        judge_dir = _validated_path_component(judge_model, "judge name")
+        if not isinstance(exp_suffix, str) or (
+            exp_suffix
+            and (
+                not re.fullmatch(r"_[A-Za-z0-9._-]{1,64}", exp_suffix)
+                or "${" in exp_suffix
+            )
+        ):
+            raise ValueError(f"unsafe judgement filename suffix: {exp_suffix!r}")
         file = (
             f"data{seed}_judgement{exp_suffix}.csv"
             if not swap
             else f"data{seed}_swap_judgement{exp_suffix}.csv"
         )
-        return self.exp_dir / dirs / judge_model / file
+        return self._validated_output_path(self.exp_dir / dirs / judge_dir / file)
+
+    def _validated_output_path(self, path: Path) -> Path:
+        """Keep every generated filename inside a non-symlinked exp tree."""
+        try:
+            relative = path.relative_to(self.exp_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"output path escapes experiment directory: {path}"
+            ) from exc
+
+        if self.exp_dir.is_symlink():
+            raise ValueError(
+                f"experiment directory may not be a symlink: {self.exp_dir}"
+            )
+        current = self.exp_dir
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"output path contains a symlink: {current}")
+        try:
+            path.resolve().relative_to(self.exp_dir.resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(
+                f"output path escapes experiment directory: {path}"
+            ) from exc
+        return path
 
 
 def get_few_shot_messages(
@@ -93,8 +152,8 @@ def get_few_shot_messages(
             yaml_dir = yaml_dir / few_shot_model
         files = list(yaml_dir.glob("*.yaml"))
     else:
-        yaml_dir_correct = base_dir / f"correct_consultant"
-        yaml_dir_incorrect = base_dir / f"incorrect_consultant"
+        yaml_dir_correct = base_dir / "correct_consultant"
+        yaml_dir_incorrect = base_dir / "incorrect_consultant"
         if few_shot_model is not None:
             yaml_dir_correct = yaml_dir_correct / few_shot_model
             yaml_dir_incorrect = yaml_dir_incorrect / few_shot_model
