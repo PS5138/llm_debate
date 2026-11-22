@@ -14,8 +14,11 @@ baseline, debate, or judging runs.
 From the repository root, after installing `requirements.txt` into `.venv`:
 
 ```bash
-.venv/bin/python -m streamlit run app/streamlit_app.py --server.address=127.0.0.1
+make run
 ```
+
+This is shorthand for
+`.venv/bin/python -m streamlit run app/streamlit_app.py --server.address=127.0.0.1`.
 
 Open the local URL printed by Streamlit, normally `http://127.0.0.1:8501`.
 Binding to `127.0.0.1` keeps the unauthenticated research interface off the

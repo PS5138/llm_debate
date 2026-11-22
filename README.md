@@ -434,13 +434,18 @@ make test    # local no-API regression suite
 ### Run the Streamlit app
 
 The Streamlit frontend is the **only supported way to launch an experiment**.
-The command below starts the local web app on the loopback interface; model
-family, case count, baseline choice, API keys, confirmation, stopping, and
-resume/extension are all handled in the UI.
+From the repository root, the command below starts the local web app on the
+loopback interface; model family, case count, baseline choice, API keys,
+confirmation, stopping, and resume/extension are all handled in the UI.
 
 ```bash
-.venv/bin/python -m streamlit run app/streamlit_app.py --server.address=127.0.0.1
+make run
 ```
+
+This is shorthand for
+`.venv/bin/python -m streamlit run app/streamlit_app.py --server.address=127.0.0.1`.
+Open the printed URL (normally `http://127.0.0.1:8501`), keep the terminal
+open while a run is in progress, and press Ctrl+C to stop the server.
 
 Paste keys into the password fields in the sidebar. They are written only to a
 permission-restricted, session-scoped temporary file for the duration of the

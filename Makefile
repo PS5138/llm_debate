@@ -1,4 +1,7 @@
-.PHONY: hooks test
+.PHONY: hooks test run
+
+run:
+	.venv/bin/python -m streamlit run app/streamlit_app.py --server.address=127.0.0.1
 
 hooks:
 	pre-commit install --overwrite --install-hooks --hook-type pre-commit --hook-type post-checkout --hook-type pre-push
