@@ -265,6 +265,62 @@ order-sensitive cases to 0.5, but E2 still shows 18% position-biased cases.
 That makes E2 directionally encouraging but less clean than E3, which has 9%
 position bias. E1 and E4 are cleaner again at 5% and 3%.
 
+### Limitations of the OpenAI run
+
+The following limitations were identified in a post-hoc audit of the cached
+run artefacts. The run was not repeated; the results above should be
+interpreted in light of them.
+
+#### Principal limitation: best-of-N argument selection was largely inoperative
+
+The protocol specifies best-of-4 (BoN=4) selection: each debater samples four
+candidate arguments per turn, a preference judge rates each candidate, and the
+highest-rated candidate enters the transcript. In practice this selection
+seldom took effect. The preference judge's output was capped at 64 completion
+tokens, and `gpt-5.5` frequently exhausted that budget on hidden reasoning
+before emitting an answer. The resulting empty responses were scored as
+indeterminate (0.5). In total, 88% of the 2,400 candidate ratings were
+indeterminate, and all four candidates tied on 516 of the 600 debater turns
+(86%). Because ties resolve to the first candidate, the transcripts consist
+predominantly of first-sampled arguments, and the condition studied is closer
+to BoN=1 than to the specified BoN=4.
+
+A post-hoc diagnostic on a single case reproduced the mechanism. With the
+64-token cap, the preference prompt for the correct debater's argument
+returned an answer in 6 of 6 trials, using 33–49 reasoning tokens. The prompt
+for the incorrect debater's argument returned an empty response in 6 of 6
+trials, having consumed the full allowance. With a 2,000-token cap, the latter
+prompt returned an answer in 3 of 3 trials, using 512 reasoning tokens.
+
+The failure was also asymmetric. Selection could discriminate between
+candidates on 84 turns, of which 66 belonged to the correct debater and 18 to
+the incorrect debater. In principle, this could advantage the truthful side.
+However, among the 39 debates in which no selection occurred on any turn, E2
+accuracy rose from 53.8% (blind) to 85.9% (debate), which suggests that the
+observed gain does not depend on argument selection. This subset is small and
+was not randomly assigned, so the comparison is indicative rather than
+conclusive.
+
+#### Minor limitations
+
+- **Unmatched reasoning between oracle and debate judges.** The oracle
+  baseline instructs the judge to output its answer only, whereas the debate
+  judges are instructed to reason in writing before answering. Explicit
+  reasoning may improve accuracy, so the oracle ceiling may be slightly
+  understated. This bears on the claims that E2 matches the oracle and that
+  E3 exceeds it, and on PGR values at or above 100%. It does not bear on the
+  primary debate-versus-blind comparison. The effect is likely small, because
+  the judge models can reason internally even when no written reasoning is
+  requested. The blind baseline has the same mismatch.
+- **Incomplete relabelling under A/B swapping.** The swapped judging pass
+  exchanges the debater labels but not references to those labels within the
+  argument text. In 55 of the 100 debates, a debater refers to its opponent by
+  name (e.g. "Debater B's case proves ACS risk, not MI."). Under swapping,
+  such statements appear to be self-directed. E2 swapped-pass accuracy was
+  70.9% in affected debates and 82.2% in unaffected ones, although this
+  comparison is uncontrolled. Because the inconsistency arises only in the
+  swapped pass, any effect would bias accuracy downward rather than upward.
+
 ### Discussion
 
 Khan et al. (2024), *Debating with More Persuasive LLMs Leads to More Truthful

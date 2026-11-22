@@ -142,6 +142,7 @@ PROD_SECRETS.*
 .streamlit/secrets.*.toml
 .DS_Store
 exp/
+tmp_runs/
 pyrightconfig.json
 *.db
 
